@@ -17,7 +17,7 @@ rocksdb::Options DefaultRocksDBOptions() {
     options.max_background_flushes = 2;
     options.bytes_per_sync = 1048576;
     options.compaction_pri = rocksdb::kMinOverlappingRatio;
-    options.compression = rocksdb::kNoCompression;
+    options.compression = rocksdb::kSnappyCompression;
     options.enable_pipelined_write = true;
     options.allow_mmap_reads = true;
     options.avoid_unnecessary_blocking_io = true;
@@ -27,6 +27,8 @@ rocksdb::Options DefaultRocksDBOptions() {
     table_options.block_size = 16 * 1024;
     table_options.cache_index_and_filter_blocks = true;
     table_options.pin_l0_filter_and_index_blocks_in_cache = true;
+    table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10, false));
+    table_options.block_cache = rocksdb::NewLRUCache(256ULL * 1024 * 1024);
     table_options.data_block_index_type = rocksdb::BlockBasedTableOptions::kDataBlockBinaryAndHash;
     table_options.checksum = rocksdb::kNoChecksum;
     table_options.format_version = 4;
