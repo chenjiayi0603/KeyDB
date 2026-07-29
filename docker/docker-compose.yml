@@ -1,0 +1,81 @@
+services:
+  # ==================== KeyDB Master ====================
+  keydb-master:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    image: keydb-flash:latest
+    container_name: keydb-master
+    hostname: keydb-master
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./conf/keydb-master.conf:/etc/keydb/keydb.conf:ro
+      - keydb_master_data:/data
+    networks:
+      - keydb-net
+    healthcheck:
+      test: ["CMD", "keydb-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ==================== KeyDB Replica 1 ====================
+  keydb-replica-1:
+    image: keydb-flash:latest
+    container_name: keydb-replica-1
+    hostname: keydb-replica-1
+    ports:
+      - "6380:6379"
+    volumes:
+      - ./conf/keydb-replica.conf:/etc/keydb/keydb.conf:ro
+      - keydb_replica1_data:/data
+    networks:
+      - keydb-net
+    command: >
+      /etc/keydb/keydb.conf
+      --replicaof keydb-master 6379
+    depends_on:
+      keydb-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "keydb-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+  # ==================== KeyDB Replica 2 ====================
+  keydb-replica-2:
+    image: keydb-flash:latest
+    container_name: keydb-replica-2
+    hostname: keydb-replica-2
+    ports:
+      - "6381:6379"
+    volumes:
+      - ./conf/keydb-replica.conf:/etc/keydb/keydb.conf:ro
+      - keydb_replica2_data:/data
+    networks:
+      - keydb-net
+    command: >
+      /etc/keydb/keydb.conf
+      --replicaof keydb-master 6379
+    depends_on:
+      keydb-master:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "keydb-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+
+volumes:
+  keydb_master_data:
+  keydb_replica1_data:
+  keydb_replica2_data:
+
+networks:
+  keydb-net:
+    driver: bridge

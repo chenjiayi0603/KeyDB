@@ -59,3 +59,4 @@ Makefile.dep
 .ccls-cache/*
 compile_commands.json
 keydb.code-workspace
+claude-cli/
