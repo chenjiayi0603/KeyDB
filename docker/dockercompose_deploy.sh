@@ -1,4 +1,20 @@
 #!/bin/bash
+# ============================================================
+#  KeyDB + RocksDB FLASH 主从集群 — 部署管理脚本
+#
+#  用法:
+#    ./dockercompose_deploy.sh start      # 构建镜像并启动集群
+#    ./dockercompose_deploy.sh stop       # 停止集群 (保留数据卷)
+#    ./dockercompose_deploy.sh restart    # 重启集群
+#    ./dockercompose_deploy.sh status     # 查看完整状态 (容器/复制/FLASH/资源)
+#    ./dockercompose_deploy.sh down       # 停止并清除所有数据 (需确认)
+#    ./dockercompose_deploy.sh logs       # 查看实时日志
+#
+#  节点端口:
+#    Master     localhost:6379
+#    Replica-1  localhost:6380
+#    Replica-2  localhost:6381
+# ============================================================
 set -e
 
 cd "$(dirname "$0")"
