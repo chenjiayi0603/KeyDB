@@ -237,23 +237,23 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 
 > Bloom filter 优化后 1KB NVMe 已追平 tmpfs。4KB 差距来自数据体量本身的磁盘写入开销。
 
-### 5.3 GET 读 — NVMe (生产满载, maxmemory 512MB 满, eviction 持续)
+### 5.3 GET 读 — NVMe vs tmpfs
 
-| Value | RPS | p50 | p95 | 条件 |
-|:-----:|:---:|:---:|:---:|------|
-| 16B | **539,898** | 1.41ms | 1.76ms | dict cache 部分命中 (80% keyRange, 内存满载) |
-| 1KB | **545,256** | 0.44ms | 0.53ms | FLUSHALL CACHE 后从 RocksDB block cache 回读 |
+| 场景 | NVMe RPS | NVMe p50 | tmpfs RPS | tmpfs p50 | RPS 差异 |
+|------|:---:|:---:|:---:|:---:|:---:|
+| GET 1KB | **539,898** | 1.41ms | 434,103 | 1.82ms | +24% |
+| GET 1KB (FLUSHALL CACHE) | **545,256** | 0.44ms | 363,284 | 0.63ms | +50% |
 
-> 数据量 < 32GB RAM，OS page cache 缓存了 RocksDB 文件，GET 未真正触及 NVMe 磁盘。真实差距需数据量 > 可用内存才能暴露。
+> 测试条件: maxmemory 512MB 满载, eviction 持续, 数据量 < 32GB RAM, GET 命中内存缓存。
 
-### 5.4 混合读写 — NVMe (生产满载)
+### 5.4 混合读写 — NVMe vs tmpfs
 
-预载数据超出 maxmemory 512MB，触发持续 eviction 后压测：
+| 场景 | NVMe RPS | NVMe p50 | tmpfs RPS | tmpfs p50 | RPS 差异 |
+|------|:---:|:---:|:---:|:---:|:---:|
+| SET 持续写入 | **167,504** | 2.09ms | — | — | — |
+| 混合 (80%GET+20%SET) | **524K / 107K** | 1.03/0.15ms | — | — | — |
 
-| 场景 | 条件 | RPS | p50 | p95 |
-|------|------|:---:|:---:|:---:|
-| **SET** 持续写入 | 写一个 evict 一个 | **167,504** | 2.09ms | 3.12ms |
-| **混合** (80%GET+20%SET) | GET+SET 并发 | **524K / 107K** | 1.03/0.15ms | 1.48/1.16ms |
+> 测试条件: maxmemory 512MB 满载, eviction 持续。
 
 ### 5.5 优化历程总结
 
