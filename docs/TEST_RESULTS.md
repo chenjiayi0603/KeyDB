@@ -239,12 +239,21 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 
 ### 5.3 GET 读 — NVMe vs tmpfs
 
-| 场景 | NVMe RPS | NVMe p50 | tmpfs RPS | tmpfs p50 | RPS 差异 |
-|------|:---:|:---:|:---:|:---:|:---:|
-| GET 1KB | 475,511 | 1.30ms | **570,645** | 1.38ms | -17% |
-| GET 1KB (FLUSHALL CACHE) | — | — | — | — | — |
+**冷数据场景**: 预载 3x maxmemory 数据量, FLUSHALL CACHE 清空 dict, keyRange=3x 数据量 (约 67% 命中 RocksDB):
 
-> 测试条件: 同批预载 80 万 key, maxmemory 512MB 满载, eviction 持续。tmpfs 快 17%，差异来自 eviction 时 NVMe 有实际磁盘 I/O 拖慢 dict cache 更新。
+| Value | NVMe RPS | NVMe p50 | NVMe p95 | tmpfs RPS | tmpfs p50 | tmpfs p95 | RPS 差异 |
+|:-----:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| 16B | **380,300** | 2.03ms | 2.73ms | 362,910 | 2.07ms | 3.03ms | +5% |
+| 1KB | **357,338** | 2.20ms | 3.34ms | 317,722 | 2.22ms | 3.76ms | +12% |
+| 4KB | 254,884 | 2.61ms | 4.58ms | **255,571** | 2.64ms | 3.78ms | -0% |
+
+**热数据场景**: 预载 80 万 key, dict cache 部分命中, maxmemory 512MB 满载:
+
+| Value | NVMe RPS | tmpfs RPS | RPS 差异 |
+|:-----:|:---:|:---:|:---:|
+| 1KB | 475,511 | **570,645** | -17% |
+
+> 冷数据 NVMe≈tmpfs，因为 RocksDB block cache + OS page cache 缓存了数据，未触及磁盘。热数据 tmpfs 快 17%，NVMe 的 eviction 磁盘 I/O 拖慢了 dict cache 更新。
 
 ### 5.4 混合读写 — NVMe vs tmpfs
 
