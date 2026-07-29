@@ -210,18 +210,19 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 > 最终配置: **Bloom filter only** (见 §2.2)。NVMe SSD。tmpfs 为参照。
 > 其余调参 (ZSTD/compactions=8/block_cache) 经实测全部回退 — 详见 §5.4。
 
-### 5.1 优化迭代对比 (SET 写, NVMe, 1KB value)
+### 5.1 优化项及效果 (SET 写, NVMe, 1KB value)
 
-| 版本 | 变更 | RPS | vs v0 | 结论 |
-|------|------|:---:|:---:|------|
-| v0 | 原始 | 35,848 | — | 基准 |
-| v1 | **+Bloom** | 75,304 | +110% | ✅ |
-| v2 | +全ZSTD+compactions=8 | 61,404 | +71% | ⚠️ 倒退 |
-| v3 | +底层ZSTD | 50,735 | +42% | ❌ 继续倒退 |
-| v4 | storage-provider-options分离 | 58,123 | +62% | ❌ 还是倒退 |
-| **最终** | **只 Bloom** + optimize_filters_for_hits | **113,503** | **+217%** | ✅ 最优 |
+| 配置项 | 位置 | 原始值 | 优化值 | 1KB RPS | 提升 |
+|--------|------|:---:|:---:|:---:|:---:|
+| filter_policy | `rocksdbfactory.cpp` | (无) | NewBloomFilterPolicy(10) | 35,848 → **113,503** | **+217%** |
+| optimize_filters_for_memory | `rocksdbfactory.cpp` | false | true | ↑ | — |
+| optimize_filters_for_hits | `rocksdbfactory.cpp` | false | true | ↑ | — |
+| format_version | `rocksdbfactory.cpp` | 4 | 5 | ↑ | — |
+| cache_index_and_filter_blocks | `rocksdbfactory.cpp` | false | true | ↑ | — |
 
-> 额外调参全部有害: compactions=8 → 磁盘 I/O 争抢; ZSTD → CPU 开销 > 磁盘节省; block_cache → 吃内存。**只加 Bloom filter，其余不动，性能最优。**
+> 以上 5 项为全部有效优化，均在 `DefaultRocksDBOptions()` 中硬编码。
+>
+> **探索过但被回退的调参**：`compression=kZSTD`（CPU 开销 > 磁盘节省）、`bottommost_compression=kZSTD`（同上）、`max_background_compactions=8`（8 线程争抢 NVMe 带宽）、`block_cache=128MB`（吃掉 KeyDB dict cache 内存）、`max_write_buffer_number=3`（OOM 风险）。最终结论：**只加 Bloom filter，其余保持 RocksDB 默认值。**
 
 ### 5.2 SET 写 — NVMe vs tmpfs
 
@@ -242,28 +243,15 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 
 > GET 均命中内存缓存，未触及磁盘。差距来自 debug build 的 RESP 解析开销。
 
-### 5.4 优化历程总结 — 唯一有效的优化: Bloom filter
+### 5.4 优化历程总结
 
-其余调参效果：
+四轮迭代探索了 Bloom filter、ZSTD 压缩、compaction 并行度、block_cache 四项调参。最终只有 Bloom filter 有效（+217%），其余三项在 ≤4KB value 场景下均导致性能倒退：
 
-| 调参 | 预期 | 实测 | 原因 |
-|------|------|:---:|------|
-| Bloom filter | 减少 compaction I/O | ✅ +217% | SST 扫描从磁盘 I/O 变内存查询 |
-| ZSTD 压缩 | 减少 SST 体积 | ❌ 倒退 | CPU 开销 > 磁盘节省 (≤1KB value) |
-| compactions=8 | 并行加速 | ❌ 倒退 | 8 线程争抢 NVMe 带宽 |
-| block_cache=128MB | 减少磁盘读 | ❌ 倒退 | 吃掉 KeyDB dict cache 所需内存 |
+- **ZSTD 压缩**：CPU 压缩/解压开销 > 减少的磁盘 I/O 量（≤1KB value 时 SST 本身不大）
+- **compactions=8**：8 个后台线程同时读写 NVMe 导致 I/O 争抢，不如默认的 4 线程
+- **block_cache=128MB**：额外内存占用挤占了 KeyDB dict cache，反而增加 RocksDB 读取次数
 
-**最终配置** (5 行改动, `src/storage/rocksdbfactory.cpp`):
-
-| 参数 | 值 | 说明 |
-|------|-----|------|
-| filter_policy | NewBloomFilterPolicy(10) | 10 bits/key |
-| format_version | 5 | 分区 filter/index |
-| optimize_filters_for_memory | true | 减少 filter 内存 |
-| optimize_filters_for_hits | true | 优化 filter 层级 |
-| cache_index_and_filter_blocks | true | filter 可被淘汰 |
-
-> 可通过 `storage-provider-options` 配置: `max_background_compactions`, `max_background_flushes` (建议保持默认 4/2)。
+可通过 `keydb.conf` 的 `storage-provider-options` 调整的参数仅 `max_background_compactions` 和 `max_background_flushes`，建议保持默认值 4/2。
 
 ### 5.5 读写混合 & 大 value 限制
 
