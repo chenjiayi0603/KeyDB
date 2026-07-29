@@ -12,32 +12,53 @@
 #include <sys/stat.h> 
 #include <sys/statvfs.h>
 
+// ===================================================================
+// RocksDB 默认配置
+// DBOptions 级别参数 → 通过 keydb.conf 的 storage-provider-options 覆盖
+// BlockBasedTableOptions 级别参数 → 仅能在此硬编码 (RocksDB API 限制)
+// ===================================================================
 rocksdb::Options DefaultRocksDBOptions() {
     rocksdb::Options options;
-    options.max_background_compactions = 8;   // 4→8, 并行 compaction 翻倍
-    options.max_background_flushes = 4;       // 2→4, memtable 刷盘并行度提升
-    options.bytes_per_sync = 1048576;
+
+    // ---- DBOptions ----
+    // 以下参数可通过 keydb.conf storage-provider-options 覆盖:
+    //   storage-provider-options "max_background_compactions=8;max_background_flushes=4"
+    options.max_background_compactions = 4;          // 建议: 8
+    options.max_background_flushes = 2;               // 建议: 4
+    // ---- DBOptions (仅能硬编码, GetDBOptionsFromString 不支持) ----
+    // [优化] 仅最底层 ZSTD 压缩: 热数据不压(CPU优先), 冷数据压缩(空间优先)
+    options.bottommost_compression = rocksdb::kZSTD;
+    // [优化] 优化 filter 层级放置 (缓存命中率高时)
+    options.optimize_filters_for_hits = true;
+    // [优化] 3个 memtable 缓冲写入峰值
+    options.max_write_buffer_number = 3;
+    // ---- DBOptions (基础配置) ----
+    options.bytes_per_sync = 1048576;                // 1MB
     options.compaction_pri = rocksdb::kMinOverlappingRatio;
-    options.compression = rocksdb::kNoCompression;         // 上层不压缩 (热数据, CPU优先)
-    options.bottommost_compression = rocksdb::kZSTD;       // 仅最底层压缩 (冷数据, 空间优先)
+    options.compression = rocksdb::kNoCompression;   // 上层不压
     options.enable_pipelined_write = true;
     options.allow_mmap_reads = true;
     options.avoid_unnecessary_blocking_io = true;
-    options.optimize_filters_for_hits = true;
-    options.write_buffer_size = 64 * 1024 * 1024;         // 64MB memtable
-    options.max_write_buffer_number = 3;                   // 3个memtable
+    options.write_buffer_size = 64 * 1024 * 1024;    // 64MB
     options.prefix_extractor.reset(rocksdb::NewFixedPrefixTransform(0));
 
+    // ---- BlockBasedTableOptions (必须硬编码, 以下为优化新增) ----
     rocksdb::BlockBasedTableOptions table_options;
     table_options.block_size = 16 * 1024;
+    // [优化] Bloom filter: 10 bits/key → ~1% 误判, compaction SST 扫描加速
     table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
+    // [优化] 减少 filter 内存占用
     table_options.optimize_filters_for_memory = true;
+    // [优化] 索引和 filter 放入 block cache (可被淘汰, 节省内存)
     table_options.cache_index_and_filter_blocks = true;
+    // [优化] L0 的 filter/index 固定在缓存 (不被淘汰, 热数据路径)
     table_options.pin_l0_filter_and_index_blocks_in_cache = true;
+    // [优化] SST 块内哈希索引, 加速点查
     table_options.data_block_index_type = rocksdb::BlockBasedTableOptions::kDataBlockBinaryAndHash;
     table_options.checksum = rocksdb::kNoChecksum;
+    // [优化] format v5 支持分区 filter/index, 更好缓存局部性
     table_options.format_version = 5;
-    // 128MB block cache (默认8MB), 减少磁盘读取
+    // [优化] 128MB block cache (默认8MB), 减少磁盘读取
     table_options.block_cache = rocksdb::NewLRUCache(128 * 1024 * 1024);
     options.table_factory.reset(NewBlockBasedTableFactory(table_options));
 
