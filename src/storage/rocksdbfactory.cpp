@@ -26,12 +26,10 @@ rocksdb::Options DefaultRocksDBOptions() {
     options.max_background_compactions = 4;          // 建议: 8
     options.max_background_flushes = 2;               // 建议: 4
     // ---- DBOptions (仅能硬编码, GetDBOptionsFromString 不支持) ----
-    // [优化] 仅最底层 ZSTD 压缩: 热数据不压(CPU优先), 冷数据压缩(空间优先)
-    options.bottommost_compression = rocksdb::kZSTD;
     // [优化] 优化 filter 层级放置 (缓存命中率高时)
     options.optimize_filters_for_hits = true;
-    // [优化] 3个 memtable 缓冲写入峰值
-    options.max_write_buffer_number = 3;
+    // 注: ZSTD 压缩经实测对 ≤1KB value 无收益 (CPU开销 > 磁盘节省), 保持关闭
+    // 注: max_background_compactions=8 经实测导致 I/O 争抢, 保持默认4
     // ---- DBOptions (基础配置) ----
     options.bytes_per_sync = 1048576;                // 1MB
     options.compaction_pri = rocksdb::kMinOverlappingRatio;
