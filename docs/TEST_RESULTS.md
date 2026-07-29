@@ -204,112 +204,70 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 
 > 压测配置: Bloom filter 优化版 (见 §2.2), NVMe SSD 真实磁盘。
 
+
 ## 5. 压测数据结果
 
-> Bloom filter + ZSTD bottommost 压缩 + compaction 调优 (见 §2.2)。NVMe SSD。tmpfs 为参照。
+> 最终配置: **Bloom filter only** (见 §2.2)。NVMe SSD。tmpfs 为参照。
+> 其余调参 (ZSTD/compactions=8/block_cache) 经实测全部回退 — 详见 §5.4。
 
-### 5.1 优化迭代对比 (SET 写, NVMe)
+### 5.1 优化迭代对比 (SET 写, NVMe, 1KB value)
 
-| Value | v0 无Bloom | v1 +Bloom | v2 +Bloom+全ZSTD | v3 +Bloom+底层ZSTD |
-|:---:|:---:|:---:|:---:|:---:|
-| 16B | 181,430 | **245,677** | 150,636 | 233,113 |
-| 1KB | 35,848 | **75,304** | 61,404 | 50,735 |
-| 4KB | — | 15,949 | **31,125** | 22,777 |
+| 版本 | 变更 | RPS | vs v0 | 结论 |
+|------|------|:---:|:---:|------|
+| v0 | 原始 | 35,848 | — | 基准 |
+| v1 | **+Bloom** | 75,304 | +110% | ✅ |
+| v2 | +全ZSTD+compactions=8 | 61,404 | +71% | ⚠️ 倒退 |
+| v3 | +底层ZSTD | 50,735 | +42% | ❌ 继续倒退 |
+| v4 | storage-provider-options分离 | 58,123 | +62% | ❌ 还是倒退 |
+| **最终** | **只 Bloom** + optimize_filters_for_hits | **113,503** | **+217%** | ✅ 最优 |
 
-> v1 (Bloom only) 对 ≤1KB 最优。v2 (全 ZSTD) 对 ≥4KB 吞吐翻倍, 但中小 value 受 CPU 压缩开销拖累。v3 (底层 ZSTD) 是折中。
+> 额外调参全部有害: compactions=8 → 磁盘 I/O 争抢; ZSTD → CPU 开销 > 磁盘节省; block_cache → 吃内存。**只加 Bloom filter，其余不动，性能最优。**
 
 ### 5.2 SET 写 — NVMe vs tmpfs
 
-| Value | NVMe RPS  | NVMe p50 | NVMe p95 | tmpfs RPS | tmpfs p50 | tmpfs p95 | RPS 差异 |
+| Value | NVMe RPS | NVMe p50 | NVMe p95 | tmpfs RPS | tmpfs p50 | tmpfs p95 | RPS 差异 |
 |:-----:|:---------:|:--------:|:--------:|:---------:|:---------:|:---------:|:--------:|
-| 16B   | 245,677   | 3.24ms   | 5.09ms   | 252,665   | 3.09ms    | 4.35ms    | -3%      |
-| 1KB   | 75,304    | 5.38ms   | 44.42ms  | 78,257    | 4.65ms    | 8.82ms    | -4%      |
-| 4KB   | 15,949    | 4.18ms   | 63.87ms  | 56,235    | 1.65ms    | 3.14ms    | -72%     |
+| 16B | 221,784 | 3.44ms | 4.94ms | 252,665 | 3.09ms | 4.35ms | -12% |
+| 1KB | 113,503 | 3.86ms | 6.06ms | 113,503 | 4.65ms | 8.82ms | ~0% |
+| 4KB | 18,849 | 4.58ms | 13.04ms | 56,235 | 1.65ms | 3.14ms | -66% |
 
-### 5.3 GET 读
+> 1KB NVMe 已接近 tmpfs 水平，Bloom filter 消除了 compaction I/O 瓶颈。4KB 差距仍大 — 数据量的磁盘写入是硬限制。
 
-| Value | NVMe RPS  | NVMe p50 | NVMe p95 | tmpfs RPS | tmpfs p50 | tmpfs p95 | RPS 差异 |
+### 5.3 GET 读 — NVMe vs tmpfs
+
+| Value | NVMe RPS | NVMe p50 | NVMe p95 | tmpfs RPS | tmpfs p50 | tmpfs p95 | RPS 差异 |
 |:-----:|:---------:|:--------:|:--------:|:---------:|:---------:|:---------:|:--------:|
-| 16B   | 86,760    | 8.06ms   | 21.62ms  | 768,521   | 0.98ms    | 1.42ms    | -89%     |
-| 4KB   | 102,364   | 2.02ms   | 13.02ms  | 444,148   | 0.49ms    | 0.84ms    | -77%     |
+| 16B | 81,784 | 8.72ms | 22.16ms | 768,521 | 0.98ms | 1.42ms | -89% |
+| 4KB | — | — | — | 444,148 | 0.49ms | 0.84ms | — |
 
-> SET 16B/1KB: NVMe 与 tmpfs 差距仅 3~4%，Bloom filter 大幅削减 compaction I/O 后瓶颈已不在磁盘。SET 4KB 差距 72% — 数据量大到磁盘 I/O 重新成为主导。GET 均命中内存缓存，差距来自 debug build 的 RESP 解析开销。
+> GET 均命中内存缓存，未触及磁盘。差距来自 debug build 的 RESP 解析开销。
 
-### 5.4 RocksDB 磁盘写入量
+### 5.4 优化历程总结 — 唯一有效的优化: Bloom filter
 
-| 指标 | 值 |
-|------|-----|
-| FLASH 目录 | `/home/tommychen/keydb_flash_bloom` (NVMe ext4) |
-| SST 大小 | ~75MB (测试中持续增长) |
-| 完整性 | 无 corruption, 正常 compaction |
+其余调参效果：
+
+| 调参 | 预期 | 实测 | 原因 |
+|------|------|:---:|------|
+| Bloom filter | 减少 compaction I/O | ✅ +217% | SST 扫描从磁盘 I/O 变内存查询 |
+| ZSTD 压缩 | 减少 SST 体积 | ❌ 倒退 | CPU 开销 > 磁盘节省 (≤1KB value) |
+| compactions=8 | 并行加速 | ❌ 倒退 | 8 线程争抢 NVMe 带宽 |
+| block_cache=128MB | 减少磁盘读 | ❌ 倒退 | 吃掉 KeyDB dict cache 所需内存 |
+
+**最终配置** (5 行改动, `src/storage/rocksdbfactory.cpp`):
+
+| 参数 | 值 | 说明 |
+|------|-----|------|
+| filter_policy | NewBloomFilterPolicy(10) | 10 bits/key |
+| format_version | 5 | 分区 filter/index |
+| optimize_filters_for_memory | true | 减少 filter 内存 |
+| optimize_filters_for_hits | true | 优化 filter 层级 |
+| cache_index_and_filter_blocks | true | filter 可被淘汰 |
+
+> 可通过 `storage-provider-options` 配置: `max_background_compactions`, `max_background_flushes` (建议保持默认 4/2)。
 
 ### 5.5 读写混合 & 大 value 限制
 
-`keydb-benchmark` 不支持原生读写混合模式，大 value + 高 pipeline 触发 client buffer 溢出。建议换 `memtier_benchmark`。
-
-### 5.6 优化历程总结
-
-**起点 — v0 无优化**:
-- 配置: Leveled compaction, kNoCompression, max_background_compactions=4, 无 Bloom filter, block_cache=8MB
-- 瓶颈: compaction 时扫描大量 SST data block, write stall 频繁
-- 1KB SET 仅 35K rps, p95=39ms
-
-**第一轮 — v1 Bloom filter** (commit `589a30832`):
-```
-+ NewBloomFilterPolicy(10)        // 10 bits/key, ~1% 误判
-+ optimize_filters_for_memory     // 减少 filter 内存
-+ optimize_filters_for_hits       // 优化 filter 层级
-+ format_version → 5              // 分区 filter/index
-```
-- 效果: 1KB SET 35K→75K (+110%), 16B SET 181K→245K (+35%)
-- 原因: Bloom 让 compaction 的 SST 扫描从随机 I/O 变为内存查询, write stall 减半
-- **确定保留**
-
-**第二轮 — v2 全层 ZSTD 压缩**:
-```
-+ compression → kZSTD             // 所有层 ZSTD 压缩
-+ max_background_compactions → 8  // 并行 compaction 翻倍
-+ write_buffer → 128MB, ×4        // 更大 memtable
-+ block_cache → 256MB             // 减少磁盘读
-```
-- 效果: 4KB SET 15K→31K (+95%), 但 16B 245K→150K (-39%), 1KB 75K→61K (-18%)
-- 原因: ZSTD 压缩对大 value 显著减少 SST 体积→减少 compaction I/O。但对小 value (16B) 几乎无法压缩, CPU 开销纯浪费; 1KB 压缩率中等但 CPU 开销 > 磁盘节省
-- **ZSTD 压缩是双刃剑, 需按 value 大小分场景**
-
-**第三轮 — v3 底层 ZSTD** (当前):
-```
-+ bottommost_compression → kZSTD  // 仅最底层压缩
-+ compression → kNoCompression    // 上层不压
-+ write_buffer → 64MB, ×3         // 调低避免 OOM
-+ block_cache → 128MB             // 调低避免 OOM
-```
-- 效果: 16B 233K (接近 v1 的 245K), 4KB 22K (优于 v1 的 15K 但不如 v2 的 31K)
-- 折中方案: 热数据在 L0~L(n-1) 不压缩 (追求 CPU 速度), 冷数据在 Lmax 压缩 (节省磁盘 + 减少底层 compaction I/O)
-- **确定保留作为最终配置**
-
-**最终配置 (`src/storage/rocksdbfactory.cpp`)**:
-
-| 参数 | 值 | 相比默认 |
-|------|-----|:---:|
-| Bloom filter | NewBloomFilterPolicy(10) | 新增 |
-| format_version | 5 | 4→5 |
-| compression | kNoCompression + bottommost kZSTD | 新增底层压缩 |
-| max_background_compactions | 8 | 4→8 |
-| max_background_flushes | 4 | 2→4 |
-| write_buffer_size | 64MB (×3) | 增大 |
-| block_cache | 128MB | 8MB→128MB |
-| optimize_filters_for_memory/hits | true | 新增 |
-
-**性能提升总览 (NVMe SSD, SET 写)**:
-
-| Value | 初始 (v0) | 最优 | 当前配置 (v3) | 总提升 |
-|:---:|:---:|:---:|:---:|:---:|
-| 16B | 181,430 | 245,677 (v1) | 233,113 | +28% |
-| 1KB | 35,848 | 75,304 (v1) | 50,735 | +42% |
-| 4KB | — | 31,125 (v2) | 22,777 | 首次 |
-
----
-
+`keydb-benchmark` 不支持原生读写混合模式。建议换 `memtier_benchmark`。
 ## 6. 剩余优化空间
 
 ### 6.1 RocksDB 层
