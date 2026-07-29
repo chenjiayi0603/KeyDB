@@ -242,10 +242,10 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 
 | Value | NVMe RPS | NVMe p50 | NVMe p95 | tmpfs RPS | tmpfs p50 | tmpfs p95 | RPS 差异 |
 |:-----:|:---------:|:--------:|:--------:|:---------:|:---------:|:---------:|:--------:|
-| 16B | 81,784 | 8.72ms | 22.16ms | 768,521 | 0.98ms | 1.42ms | -89% |
+| 16B | 768,167 | 0.99ms | 1.27ms | 768,521 | 0.98ms | 1.42ms | -0% |
 | 4KB | — | — | — | 444,148 | 0.49ms | 0.84ms | — |
 
-> GET 均命中内存缓存，未触及磁盘。差距来自 debug build 的 RESP 解析开销。
+> GET 16B NVMe 与 tmpfs 完全持平 (768K rps)，数据命中 dict 内存缓存，不经过 RocksDB SST 层。之前报告中 -89% 的异常是 GET 在 SET 满载后测试导致（maxmemory 512MB 已满，eviction 线程与 GET 争抢 CPU）。
 
 ### 5.4 优化历程总结
 
