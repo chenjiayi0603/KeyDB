@@ -206,9 +206,19 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 
 ## 5. 压测数据结果
 
-> Bloom filter 优化版 (见 §2.2)，NVMe SSD 真实磁盘。tmpfs 为参照对比。
+> Bloom filter + ZSTD bottommost 压缩 + compaction 调优 (见 §2.2)。NVMe SSD。tmpfs 为参照。
 
-### 5.1 SET 写
+### 5.1 优化迭代对比 (SET 写, NVMe)
+
+| Value | v0 无Bloom | v1 +Bloom | v2 +Bloom+全ZSTD | v3 +Bloom+底层ZSTD |
+|:---:|:---:|:---:|:---:|:---:|
+| 16B | 181,430 | **245,677** | 150,636 | 233,113 |
+| 1KB | 35,848 | **75,304** | 61,404 | 50,735 |
+| 4KB | — | 15,949 | **31,125** | 22,777 |
+
+> v1 (Bloom only) 对 ≤1KB 最优。v2 (全 ZSTD) 对 ≥4KB 吞吐翻倍, 但中小 value 受 CPU 压缩开销拖累。v3 (底层 ZSTD) 是折中。
+
+### 5.2 SET 写 — NVMe vs tmpfs
 
 | Value | NVMe RPS  | NVMe p50 | NVMe p95 | tmpfs RPS | tmpfs p50 | tmpfs p95 | RPS 差异 |
 |:-----:|:---------:|:--------:|:--------:|:---------:|:---------:|:---------:|:--------:|
@@ -216,7 +226,7 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 | 1KB   | 75,304    | 5.38ms   | 44.42ms  | 78,257    | 4.65ms    | 8.82ms    | -4%      |
 | 4KB   | 15,949    | 4.18ms   | 63.87ms  | 56,235    | 1.65ms    | 3.14ms    | -72%     |
 
-### 5.2 GET 读
+### 5.3 GET 读
 
 | Value | NVMe RPS  | NVMe p50 | NVMe p95 | tmpfs RPS | tmpfs p50 | tmpfs p95 | RPS 差异 |
 |:-----:|:---------:|:--------:|:--------:|:---------:|:---------:|:---------:|:--------:|
@@ -225,7 +235,7 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 
 > SET 16B/1KB: NVMe 与 tmpfs 差距仅 3~4%，Bloom filter 大幅削减 compaction I/O 后瓶颈已不在磁盘。SET 4KB 差距 72% — 数据量大到磁盘 I/O 重新成为主导。GET 均命中内存缓存，差距来自 debug build 的 RESP 解析开销。
 
-### 5.3 RocksDB 磁盘写入量
+### 5.4 RocksDB 磁盘写入量
 
 | 指标 | 值 |
 |------|-----|
@@ -233,7 +243,7 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 | SST 大小 | ~75MB (测试中持续增长) |
 | 完整性 | 无 corruption, 正常 compaction |
 
-### 5.4 读写混合 & 大 value 限制
+### 5.5 读写混合 & 大 value 限制
 
 `keydb-benchmark` 不支持原生读写混合模式，大 value + 高 pipeline 触发 client buffer 溢出。建议换 `memtier_benchmark`。
 

@@ -6,6 +6,7 @@
 #include <rocksdb/sst_file_manager.h>
 #include <rocksdb/utilities/convenience.h>
 #include <rocksdb/slice_transform.h>
+#include <rocksdb/cache.h>
 #include "rocksdbfactor_internal.h"
 #include <sys/types.h>
 #include <sys/stat.h> 
@@ -13,29 +14,33 @@
 
 rocksdb::Options DefaultRocksDBOptions() {
     rocksdb::Options options;
-    options.max_background_compactions = 4;
-    options.max_background_flushes = 2;
+    options.max_background_compactions = 8;   // 4→8, 并行 compaction 翻倍
+    options.max_background_flushes = 4;       // 2→4, memtable 刷盘并行度提升
     options.bytes_per_sync = 1048576;
     options.compaction_pri = rocksdb::kMinOverlappingRatio;
-    options.compression = rocksdb::kNoCompression;
+    options.compression = rocksdb::kNoCompression;         // 上层不压缩 (热数据, CPU优先)
+    options.bottommost_compression = rocksdb::kZSTD;       // 仅最底层压缩 (冷数据, 空间优先)
     options.enable_pipelined_write = true;
     options.allow_mmap_reads = true;
     options.avoid_unnecessary_blocking_io = true;
-    options.optimize_filters_for_hits = true;  // 缓存命中率高时优化 filter 放置策略
+    options.optimize_filters_for_hits = true;
+    options.write_buffer_size = 64 * 1024 * 1024;         // 64MB memtable
+    options.max_write_buffer_number = 3;                   // 3个memtable
     options.prefix_extractor.reset(rocksdb::NewFixedPrefixTransform(0));
 
     rocksdb::BlockBasedTableOptions table_options;
     table_options.block_size = 16 * 1024;
-    // 布隆过滤器: 10 bits/key → ~1% 误判率, 避免 SST 无效扫描
     table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
-    table_options.optimize_filters_for_memory = true;  // 减少 filter 内存占用
+    table_options.optimize_filters_for_memory = true;
     table_options.cache_index_and_filter_blocks = true;
     table_options.pin_l0_filter_and_index_blocks_in_cache = true;
     table_options.data_block_index_type = rocksdb::BlockBasedTableOptions::kDataBlockBinaryAndHash;
     table_options.checksum = rocksdb::kNoChecksum;
-    table_options.format_version = 5;   // v5 支持分区 filter/index, 更好的缓存局部性
+    table_options.format_version = 5;
+    // 128MB block cache (默认8MB), 减少磁盘读取
+    table_options.block_cache = rocksdb::NewLRUCache(128 * 1024 * 1024);
     options.table_factory.reset(NewBlockBasedTableFactory(table_options));
-    
+
     return options;
 }
 
