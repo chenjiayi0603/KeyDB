@@ -247,6 +247,67 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 
 `keydb-benchmark` 不支持原生读写混合模式，大 value + 高 pipeline 触发 client buffer 溢出。建议换 `memtier_benchmark`。
 
+### 5.6 优化历程总结
+
+**起点 — v0 无优化**:
+- 配置: Leveled compaction, kNoCompression, max_background_compactions=4, 无 Bloom filter, block_cache=8MB
+- 瓶颈: compaction 时扫描大量 SST data block, write stall 频繁
+- 1KB SET 仅 35K rps, p95=39ms
+
+**第一轮 — v1 Bloom filter** (commit `589a30832`):
+```
++ NewBloomFilterPolicy(10)        // 10 bits/key, ~1% 误判
++ optimize_filters_for_memory     // 减少 filter 内存
++ optimize_filters_for_hits       // 优化 filter 层级
++ format_version → 5              // 分区 filter/index
+```
+- 效果: 1KB SET 35K→75K (+110%), 16B SET 181K→245K (+35%)
+- 原因: Bloom 让 compaction 的 SST 扫描从随机 I/O 变为内存查询, write stall 减半
+- **确定保留**
+
+**第二轮 — v2 全层 ZSTD 压缩**:
+```
++ compression → kZSTD             // 所有层 ZSTD 压缩
++ max_background_compactions → 8  // 并行 compaction 翻倍
++ write_buffer → 128MB, ×4        // 更大 memtable
++ block_cache → 256MB             // 减少磁盘读
+```
+- 效果: 4KB SET 15K→31K (+95%), 但 16B 245K→150K (-39%), 1KB 75K→61K (-18%)
+- 原因: ZSTD 压缩对大 value 显著减少 SST 体积→减少 compaction I/O。但对小 value (16B) 几乎无法压缩, CPU 开销纯浪费; 1KB 压缩率中等但 CPU 开销 > 磁盘节省
+- **ZSTD 压缩是双刃剑, 需按 value 大小分场景**
+
+**第三轮 — v3 底层 ZSTD** (当前):
+```
++ bottommost_compression → kZSTD  // 仅最底层压缩
++ compression → kNoCompression    // 上层不压
++ write_buffer → 64MB, ×3         // 调低避免 OOM
++ block_cache → 128MB             // 调低避免 OOM
+```
+- 效果: 16B 233K (接近 v1 的 245K), 4KB 22K (优于 v1 的 15K 但不如 v2 的 31K)
+- 折中方案: 热数据在 L0~L(n-1) 不压缩 (追求 CPU 速度), 冷数据在 Lmax 压缩 (节省磁盘 + 减少底层 compaction I/O)
+- **确定保留作为最终配置**
+
+**最终配置 (`src/storage/rocksdbfactory.cpp`)**:
+
+| 参数 | 值 | 相比默认 |
+|------|-----|:---:|
+| Bloom filter | NewBloomFilterPolicy(10) | 新增 |
+| format_version | 5 | 4→5 |
+| compression | kNoCompression + bottommost kZSTD | 新增底层压缩 |
+| max_background_compactions | 8 | 4→8 |
+| max_background_flushes | 4 | 2→4 |
+| write_buffer_size | 64MB (×3) | 增大 |
+| block_cache | 128MB | 8MB→128MB |
+| optimize_filters_for_memory/hits | true | 新增 |
+
+**性能提升总览 (NVMe SSD, SET 写)**:
+
+| Value | 初始 (v0) | 最优 | 当前配置 (v3) | 总提升 |
+|:---:|:---:|:---:|:---:|:---:|
+| 16B | 181,430 | 245,677 (v1) | 233,113 | +28% |
+| 1KB | 35,848 | 75,304 (v1) | 50,735 | +42% |
+| 4KB | — | 31,125 (v2) | 22,777 | 首次 |
+
 ---
 
 ## 6. 剩余优化空间
