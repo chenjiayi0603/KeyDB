@@ -228,7 +228,7 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 >
 > **探索过但被回退的调参**：`compression=kZSTD`（CPU 开销 > 磁盘节省）、`bottommost_compression=kZSTD`（同上）、`max_background_compactions=8`（8 线程争抢 NVMe 带宽）、`block_cache=128MB`（吃掉 KeyDB dict cache 内存）、`max_write_buffer_number=3`（OOM 风险）。最终结论：**只加 Bloom filter，其余保持 RocksDB 默认值。**
 
-### 5.2 SET 写 — NVMe vs tmpfs
+### 5.2 SET 写 — NVMe vs tmpfs (空闲服务器, 无 eviction 压力)
 
 | Value | NVMe RPS | NVMe p50 | NVMe p95 | tmpfs RPS | tmpfs p50 | tmpfs p95 | RPS 差异 |
 |:-----:|:---------:|:--------:|:--------:|:---------:|:---------:|:---------:|:--------:|
@@ -236,16 +236,20 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 | 1KB | 113,503 | 3.86ms | 6.06ms | 113,503 | 4.65ms | 8.82ms | ~0% |
 | 4KB | 18,849 | 4.58ms | 13.04ms | 56,235 | 1.65ms | 3.14ms | -66% |
 
-> 1KB NVMe 已接近 tmpfs 水平，Bloom filter 消除了 compaction I/O 瓶颈。4KB 差距仍大 — 数据量的磁盘写入是硬限制。
+> ⚠️ 以上为空闲服务器数据（数据量 < maxmemory，无 eviction）。**生产环境满载数据见 §5.3。**
 
-### 5.3 GET 读 — NVMe vs tmpfs
+### 5.3 生产场景模拟 (1KB value, maxmemory 512MB 满载, eviction 持续)
 
-| Value | NVMe RPS | NVMe p50 | NVMe p95 | tmpfs RPS | tmpfs p50 | tmpfs p95 | RPS 差异 |
-|:-----:|:---------:|:--------:|:--------:|:---------:|:---------:|:---------:|:--------:|
-| 16B | 768,167 | 0.99ms | 1.27ms | 768,521 | 0.98ms | 1.42ms | -0% |
-| 4KB | — | — | — | 444,148 | 0.49ms | 0.84ms | — |
+预载 800K 个 key (~800MB) 超出 maxmemory 512MB，触发持续 eviction 后再压测：
 
-> GET 16B NVMe 与 tmpfs 完全持平 (768K rps)，数据命中 dict 内存缓存，不经过 RocksDB SST 层。之前报告中 -89% 的异常是 GET 在 SET 满载后测试导致（maxmemory 512MB 已满，eviction 线程与 GET 争抢 CPU）。
+| 场景 | 条件 | RPS | p50 | p95 |
+|------|------|:---:|:---:|:---:|
+| 持续写入 | 内存满载，写一个 evict 一个 | **167,504** | 2.09ms | 3.12ms |
+| 读热数据 (80% keyRange) | dict cache 部分命中，部分回读 RocksDB | **539,898** | 1.41ms | 1.76ms |
+| 读冷数据 (FLUSHALL CACHE) | 全部从 RocksDB block cache 回读 | **545,256** | 0.44ms | 0.53ms |
+| 混合读写 (80%GET + 20%SET) | GET=524K, SET=107K 并发 | **524K / 107K** | 1.03 / 0.15ms | 1.48 / 1.16ms |
+
+> 与之前 §5.2 的"空闲服测试"对比：空闲时 SET=113K，满载时 SET=167K（差异来自 key 分布和 eviction 时机）。GET 空闲 768K vs 满载 540K（-30%，eviction 线程争抢 CPU）。**这才是 FLASH 生产环境的真实数字，不是美化后的最好情况。**
 
 ### 5.4 优化历程总结
 
