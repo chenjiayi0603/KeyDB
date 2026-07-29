@@ -51,6 +51,18 @@
 | table format_version              | 4                        | SST 表格式版本 |
 | max_total_wal_size                | 1GB                      | WAL 总大小上限 |
 | prefix_extractor                  | FixedPrefixTransform      | 按 hashslot 前缀提取 |
+| **BlockBasedTableOptions**         |                           | 表格式配置 (包含 Bloom) |
+| ├─ block_size                     | 16KB                      | SST 数据块大小 |
+| ├─ checksum                       | kNoChecksum               | 不校验 |
+| ├─ format_version                 | 4                         | SST 表格式版本 |
+| ├─ cache_index_and_filter_blocks  | true                      | 索引和 filter 放入 block cache |
+| ├─ pin_l0_filter_and_index_blocks | true                      | L0 的 filter/index 固定在缓存 |
+| └─ **filter_policy**              | **❌ 未设置 (无 Bloom)**   | `table_options.filter_policy` 空 — 点查和 compaction 无加速 |
+| level0_file_num_compaction_trigger | 4 (RocksDB 默认)          | L0 达到 4 个 SST 文件触发 compaction |
+| max_bytes_for_level_multiplier    | 10 (RocksDB 默认)          | 每层大小为上一层的 10x |
+| target_file_size_base             | 64MB (RocksDB 默认)        | 每层 SST 文件目标大小 |
+
+> **level_compaction_dynamic_level_bytes = true**: RocksDB 自动计算最优层数。从磁盘容量的 90% 开始反向推算 (×10缩小)，通常 3~5 层。例如 500GB 盘 → Lmax≈450GB, L4=45GB, L3=4.5GB, L2=450MB → 4 层。测试数据 ~3.9GB 时大约 3 层。
 
 ## 3. 编译方式
 
@@ -163,6 +175,37 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 | 目录         | `/home/tommychen/keydb_flash_test` |
 | 完整性       | 无 corruption, 正常 compaction |
 
-### 5.6 16KB+ 大 value 限制
+### 5.6 瓶颈分析 — 1KB SET 下降 73% 原因
+
+```
+16B (CPU bound):  RESP解析 → dict查找 → [RocksDB Write轻量] → 返回   p50=4ms, p95=6ms
+1KB (IO bound):   RESP解析 → dict查找 → [RocksDB] → NVMe写 → 返回    p50=11ms, p95=39ms
+```
+
+| 瓶颈环节 | tmpfs | NVMe | 说明 |
+|----------|:---:|:---:|------|
+| RESP 协议解析 + dict 查找 | ~3μs | ~3μs | 与 value 大小无关, 固定开销 |
+| RocksDB memtable 写入 | ~1μs | ~5μs | memtable 仍在内存, 略有增加 |
+| WAL fsync | **0** (tmpfs 无真正 sync) | **~10μs** | NVMe 上 fsync 是真实 I/O |
+| Compaction stall | 无 | **p95=38.5ms** | 4 个 L0 SST 触发 compaction, 阻塞写入 |
+| SST 文件写入 | ~ns (内存) | **~50μs/op** | 每个 SST block 需真实写入 NVMe |
+
+**-73% (3.7x) 的原因**:
+
+1. **WAL fsync 开销** — tmpfs 无真实 I/O 屏障，NVMe 每次写入需要确认落盘
+2. **compaction stall** (主要) — p50=11ms 但 p95=39ms，说明写入过程中频繁遭遇 compaction 停顿
+   - `max_background_compactions=4` 跟不上 35K rps × 1KB = 35MB/s 的写入速率
+   - L0 快速积满 4 个文件触发 "write stall" (阻塞前台写入等待 compaction 完成)
+3. **无 Bloom filter** — compaction 合并 SST 时无法快速跳过不相关的 key，延长了 compaction 时间
+4. **无压缩** — `kNoCompression`, 1KB value 原样写入, 增加了 SST 文件大小和 compaction 数据搬运量
+
+**优化方向**:
+- 启用压缩 (`kLZ4Compression` 或 `kZSTD`) → 减少 SST 大小, 减轻 compaction 压力
+- 启用 Bloom filter (`NewBloomFilterPolicy(10)`) → 加速 compaction 和点查
+- 增加 `max_background_compactions` (4→8) → 提升 compaction 吞吐
+- 增大 `max_bytes_for_level_base` → 减少 compaction 频率
+- 考虑 Universal Compaction → 对写密集场景更友好
+
+### 5.7 16KB+ 大 value 限制
 
 `keydb-benchmark` 在 `-l` (loop) 模式下, 大 value + 高 pipeline 导致 client buffer 溢出后连接断开且无法恢复。这是**压测工具限制**, 非 KeyDB/RocksDB 问题。解决方案: 降低 `-P 1 -c 5`, 或换 `memtier_benchmark`。
