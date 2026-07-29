@@ -54,10 +54,12 @@
 | **BlockBasedTableOptions**         |                           | 表格式配置 (包含 Bloom) |
 | ├─ block_size                     | 16KB                      | SST 数据块大小 |
 | ├─ checksum                       | kNoChecksum               | 不校验 |
-| ├─ format_version                 | 4                         | SST 表格式版本 |
+| ├─ format_version                 | 5                         | v5 支持分区 filter/index |
 | ├─ cache_index_and_filter_blocks  | true                      | 索引和 filter 放入 block cache |
 | ├─ pin_l0_filter_and_index_blocks | true                      | L0 的 filter/index 固定在缓存 |
-| └─ **filter_policy**              | **❌ 未设置 (无 Bloom)**   | `table_options.filter_policy` 空 — 点查和 compaction 无加速 |
+| ├─ optimize_filters_for_memory    | true                      | 减少 filter 内存占用 |
+| └─ **filter_policy**              | **NewBloomFilterPolicy(10)** | 10 bits/key, ~1% 误判率 |
+| **optimize_filters_for_hits**     | true (DBOptions)           | 缓存命中率高时优化 filter 层级放置 |
 | level0_file_num_compaction_trigger | 4 (RocksDB 默认)          | L0 达到 4 个 SST 文件触发 compaction |
 | max_bytes_for_level_multiplier    | 10 (RocksDB 默认)          | 每层大小为上一层的 10x |
 | target_file_size_base             | 64MB (RocksDB 默认)        | 每层 SST 文件目标大小 |
@@ -116,6 +118,30 @@
 > ```
 >
 > **KeyDB 为什么用 Leveled**：默认值，适合 Redis 类 KV 的读多写少模式。但 FLASH 场景下 value 较大时，写放大会恶化——1KB value 在 compaction 中可能要搬移多次，放大到 5-10KB 的实际磁盘写入量。
+
+### 2.3 BlockBasedTableOptions 优化说明
+
+**代码变更** (`src/storage/rocksdbfactory.cpp`)：
+
+```cpp
+// 新增 Bloom filter — 10 bits/key → ~1% 误判率
+table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
+table_options.optimize_filters_for_memory = true;
+options.optimize_filters_for_hits = true;
+table_options.format_version = 5;
+
+// API 兼容修复 (RocksDB 7.10)
+rocksdb::GetDBOptionsFromString(rocksdb::ConfigOptions(), options, ...);
+```
+
+**预期效果**：
+
+| 指标 | 无 Bloom | 有 Bloom (10 bits/key) |
+|------|:---:|:---:|
+| 点查 SST 扫描 | 每个 SST 读 data block | 先查 Bloom, 99% 无效 SST 直接跳过 |
+| Compaction 合并速度 | 慢 (需读所有重叠 SST) | 快 (Bloom 快速排除不重叠 SST) |
+| Filter 内存开销 | 0 | ~1.25% 数据大小 (10 bits/key ÷ 8) |
+| 写吞吐影响 | — | 微小 (写路径仅多一次 hash 计算) |
 
 ## 3. 编译方式
 
@@ -177,7 +203,8 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 | 1      | tmpfs 内存盘 | `/tmp/keydb_bench_flash`             | ❌ 无效 (延迟 ~ns, 夸大性能) |
 | 2      | **NVMe SSD** | `/home/tommychen/keydb_flash_test`   | ✅ 有效 (真实 ext4 磁盘) |
 
-> 以下数据均为第 2 轮 (NVMe SSD) 结果。第 1 轮 tmpfs 数据仅作参照对比，不作为有效结论。
+> 以下数据均为第 2 轮 (NVMe SSD, **无 Bloom filter**) 结果。第 1 轮 tmpfs 数据仅作参照对比，不作为有效结论。
+> **优化版配置 (Bloom filter + format v5) 压测待 RocksDB 重编译完成后补充。**
 
 ## 5. 压测数据结果
 

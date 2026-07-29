@@ -21,15 +21,19 @@ rocksdb::Options DefaultRocksDBOptions() {
     options.enable_pipelined_write = true;
     options.allow_mmap_reads = true;
     options.avoid_unnecessary_blocking_io = true;
+    options.optimize_filters_for_hits = true;  // 缓存命中率高时优化 filter 放置策略
     options.prefix_extractor.reset(rocksdb::NewFixedPrefixTransform(0));
 
     rocksdb::BlockBasedTableOptions table_options;
     table_options.block_size = 16 * 1024;
+    // 布隆过滤器: 10 bits/key → ~1% 误判率, 避免 SST 无效扫描
+    table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
+    table_options.optimize_filters_for_memory = true;  // 减少 filter 内存占用
     table_options.cache_index_and_filter_blocks = true;
     table_options.pin_l0_filter_and_index_blocks_in_cache = true;
     table_options.data_block_index_type = rocksdb::BlockBasedTableOptions::kDataBlockBinaryAndHash;
     table_options.checksum = rocksdb::kNoChecksum;
-    table_options.format_version = 4;
+    table_options.format_version = 5;   // v5 支持分区 filter/index, 更好的缓存局部性
     options.table_factory.reset(NewBlockBasedTableFactory(table_options));
     
     return options;
@@ -86,7 +90,7 @@ RocksDBStorageFactory::RocksDBStorageFactory(const char *dbfile, int dbnum, cons
     {
         std::string options_string(rgchConfig, cchConfig);
         rocksdb::Status status;
-        if (!(status = rocksdb::GetDBOptionsFromString(options, options_string, &options)).ok())
+        if (!(status = rocksdb::GetDBOptionsFromString(rocksdb::ConfigOptions(), options, options_string, &options)).ok())
         {
             fprintf(stderr, "Failed to parse FLASH options: %s\r\n", status.ToString().c_str());
             exit(EXIT_FAILURE);
