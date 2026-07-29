@@ -210,20 +210,20 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 
 ### 5.1 SET 写
 
-| Value | NVMe RPS  | NVMe p50 | NVMe p95 | tmpfs RPS | RPS 差异 |
-|:-----:|:---------:|:--------:|:--------:|:---------:|:--------:|
-| 16B   | 245,677   | 3.24ms   | 5.09ms   | 199,600   | +23%     |
-| 1KB   | 75,304    | 5.38ms   | 44.42ms  | 132,802   | -43%     |
-| 4KB   | 15,949    | 4.18ms   | 63.87ms  | 99,601    | -84%     |
+| Value | NVMe RPS  | NVMe p50 | NVMe p95 | tmpfs RPS | tmpfs p50 | tmpfs p95 | RPS 差异 |
+|:-----:|:---------:|:--------:|:--------:|:---------:|:---------:|:---------:|:--------:|
+| 16B   | 245,677   | 3.24ms   | 5.09ms   | 252,665   | 3.09ms    | 4.35ms    | -3%      |
+| 1KB   | 75,304    | 5.38ms   | 44.42ms  | 78,257    | 4.65ms    | 8.82ms    | -4%      |
+| 4KB   | 15,949    | 4.18ms   | 63.87ms  | 56,235    | 1.65ms    | 3.14ms    | -72%     |
 
 ### 5.2 GET 读
 
-| Value | NVMe RPS  | NVMe p50 | NVMe p95 | tmpfs RPS | RPS 差异 |
-|:-----:|:---------:|:--------:|:--------:|:---------:|:--------:|
-| 16B   | 86,760    | 8.06ms   | 21.62ms  | 768,521   | -89%     |
-| 4KB   | 102,364   | 2.02ms   | 13.02ms  | 444,148   | -77%     |
+| Value | NVMe RPS  | NVMe p50 | NVMe p95 | tmpfs RPS | tmpfs p50 | tmpfs p95 | RPS 差异 |
+|:-----:|:---------:|:--------:|:--------:|:---------:|:---------:|:---------:|:--------:|
+| 16B   | 86,760    | 8.06ms   | 21.62ms  | 768,521   | 0.98ms    | 1.42ms    | -89%     |
+| 4KB   | 102,364   | 2.02ms   | 13.02ms  | 444,148   | 0.49ms    | 0.84ms    | -77%     |
 
-> NVMe 16B/4KB GET 均命中内存 (dict cache / RocksDB block cache)，未触及磁盘。debug build (-O0) 拖慢了 RESP 解析路径，优化编译 (-O2 -flto) 预期可恢复到 tmpfs 同级水平。
+> SET 16B/1KB: NVMe 与 tmpfs 差距仅 3~4%，Bloom filter 大幅削减 compaction I/O 后瓶颈已不在磁盘。SET 4KB 差距 72% — 数据量大到磁盘 I/O 重新成为主导。GET 均命中内存缓存，差距来自 debug build 的 RESP 解析开销。
 
 ### 5.3 RocksDB 磁盘写入量
 
