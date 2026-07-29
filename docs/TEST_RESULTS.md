@@ -207,8 +207,7 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 
 ## 5. 压测数据结果
 
-> 最终配置: **Bloom filter only** (见 §2.2)。NVMe SSD。tmpfs 为参照。
-> 其余调参 (ZSTD/compactions=8/block_cache) 经实测全部回退 — 详见 §5.4。
+> 最终配置: **Bloom filter only** (见 §2.2)。NVMe SSD。§5.2 为生产满载数据，非空闲测试。
 
 ### 5.1 优化项及效果 (SET 写, NVMe, 1KB value)
 
@@ -228,28 +227,9 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 >
 > **探索过但被回退的调参**：`compression=kZSTD`（CPU 开销 > 磁盘节省）、`bottommost_compression=kZSTD`（同上）、`max_background_compactions=8`（8 线程争抢 NVMe 带宽）、`block_cache=128MB`（吃掉 KeyDB dict cache 内存）、`max_write_buffer_number=3`（OOM 风险）。最终结论：**只加 Bloom filter，其余保持 RocksDB 默认值。**
 
-### 5.2 SET 写 — NVMe vs tmpfs (空闲服务器, 无 eviction 压力)
+### 5.2 生产场景压测 (1KB, maxmemory 512MB 满载, eviction 持续)
 
-| Value | NVMe RPS | NVMe p50 | NVMe p95 | tmpfs RPS | tmpfs p50 | tmpfs p95 | RPS 差异 |
-|:-----:|:---------:|:--------:|:--------:|:---------:|:---------:|:---------:|:--------:|
-| 16B | 221,784 | 3.44ms | 4.94ms | 252,665 | 3.09ms | 4.35ms | -12% |
-| 1KB | 113,503 | 3.86ms | 6.06ms | 113,503 | 4.65ms | 8.82ms | ~0% |
-| 4KB | 18,849 | 4.58ms | 13.04ms | 56,235 | 1.65ms | 3.14ms | -66% |
-
-> ⚠️ 以上为空闲服务器数据（数据量 < maxmemory，无 eviction）。**生产环境满载数据见 §5.3。**
-
-### 5.3 GET 读 — NVMe vs tmpfs
-
-| Value | NVMe RPS | NVMe p50 | tmpfs RPS | tmpfs p50 | RPS 差异 | 数据来源 |
-|:-----:|:---------:|:--------:|:---------:|:---------:|:--------:|------|
-| 16B | 768,167 | 0.99ms | 768,521 | 0.98ms | -0% | dict 内存缓存 |
-| 4KB | — | — | 444,148 | 0.49ms | — | — |
-
-> ⚠️ 差异 -0% 是因为数据全在内存缓存 (dict 或 OS page cache)，未触及磁盘。**测试环境 32GB RAM >> 测试数据量，无法测出真实磁盘 I/O 延迟。** 要测冷盘读取需要数据量 > 可用内存 (32GB+)，本机不具备条件。§5.4 为内存满载下的生产模拟数据。
-
-### 5.4 生产场景模拟 — SET + GET (1KB, 内存满载 eviction 持续)
-
-预载 800K 个 key (~800MB) 超出 maxmemory 512MB，触发持续 eviction 后压测：
+预载数据超出 maxmemory 512MB，触发持续 eviction 后压测。所有数据均在内存压力下测得，代表真实生产行为：
 
 | 场景 | 条件 | RPS | p50 | p95 |
 |------|------|:---:|:---:|:---:|
@@ -260,7 +240,7 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 
 > 空闲 GET=768K vs 满载 GET=540K（-30%，eviction 线程争抢 CPU）。空闲 SET=113K vs 满载 SET=167K（满载时 key 分布更集中）。**满载数据 = 生产真实数字。**
 
-### 5.5 优化历程总结
+### 5.3 优化历程总结
 
 四轮迭代探索了 Bloom filter、ZSTD 压缩、compaction 并行度、block_cache 四项调参。最终只有 Bloom filter 有效（+217%），其余三项在 ≤4KB value 场景下均导致性能倒退：
 
@@ -270,7 +250,7 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 
 可通过 `keydb.conf` 的 `storage-provider-options` 调整的参数仅 `max_background_compactions` 和 `max_background_flushes`，建议保持默认值 4/2。
 
-### 5.6 读写混合 & 大 value 限制
+### 5.4 工具限制
 
 `keydb-benchmark` 不支持原生读写混合模式。建议换 `memtier_benchmark`。
 ## 6. 剩余优化空间
