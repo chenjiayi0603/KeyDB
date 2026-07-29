@@ -371,6 +371,155 @@ docs/
 └── DEPLOY_ARCHITECTURE.md     # 本文档 (部署架构)
 ```
 
+---
+
+## 10. 复制架构：KeyDB 为何不需要零拷贝 (sendfile/splice) bypass
+
+### 10.1 背景：分布式存储的零拷贝需求
+
+分布式存储系统（如 Ceph）在复制磁盘数据块时，典型链路为：
+
+```
+磁盘 → 内核 Page Cache → [用户态 buffer 拷贝] → Socket 内核缓冲区 → 网络
+```
+
+`sendfile()` / `splice()` 等系统调用的作用是 bypass 用户态那次内存拷贝，让数据直接在内核态完成 disk fd → socket fd 的传输：
+
+```
+磁盘 → 内核 Page Cache ──sendfile──→ Socket 内核缓冲区 → 网络
+          (零拷贝，数据不出内核态)
+```
+
+这对 GB~TB 级磁盘块复制至关重要——节省的 CPU 拷贝开销随数据量线性放大。
+
+### 10.2 KeyDB 不需要零拷贝的四个原因
+
+**原因 1：常规复制走命令流，数据来源是内存**
+
+常规主从复制是**命令流**：master 执行写命令后，`replicationFeedSlaves()` 将命令序列化为 RESP 协议字节，通过 `addReply` → client output buffer → socket 直接发送。
+
+```
+复制链路：内存 redisObject → RESP 序列化 → addReply → socket
+                        (全程内存操作，无磁盘参与)
+```
+
+单条命令通常几十~几百字节，用户态拷贝开销相比命令执行本身可忽略。数据源头是内存中的 redisObject，不存在"从磁盘读出再发送"的场景，sendfile 根本不适用。
+
+**原因 2：全量同步有 Fast Sync，省掉磁盘 I/O 和一次用户态拷入**
+
+KeyDB 独创的 `SLAVE_CAPA_KEYDB_FASTSYNC` 机制 (`replication.cpp:1150 rdbSaveSnapshotForReplication()`) 直接从内存 MVCC 快照构造数据发给 slave：
+
+```
+内存 MVCC 快照 → replicationBuffer::addData (memcpy, 用户态构造 RESP)
+    → flushData → addReplyProto → client reply chain
+    → connSocketWrite → write(fd, buf, len)  ← 用户→内核拷贝 (socket send buffer)
+    → TCP/IP 协议栈 → DMA → NIC
+```
+
+对比 RDB 文件路径：
+```
+RDB 文件 → read() → 用户态 buffer [内核→用户拷贝]
+    → write() → socket 内核缓冲区 [用户→内核拷贝]
+    → TCP/IP 协议栈 → NIC
+```
+
+两者都逃不掉 `write()` 系统调用的**用户→内核拷贝**——这是 TCP socket 通信固有的。Fast Sync 的优化在于：
+- 省掉了 `read()` 的磁盘 I/O + 内核→用户拷贝
+- 省掉了 fork 子进程生成 RDB 的开销
+- 但并不消除 socket 层的用户→内核拷贝（任何用户态内存数据写 TCP socket 都必须经过这次拷贝）
+
+`sendfile()` 场景（KeyDB 未采用）：数据从内核 Page Cache 直接进 socket 缓冲区，**0 次用户空间拷贝**。但代价是必须先有 RDB 文件落盘 + TLS 下不可用。
+
+| 路径 | 拷贝次数 | 磁盘 I/O |
+|------|:---:|:---:|
+| RDB `read()`+`write()` | 2 (内核→用户 + 用户→内核) | 有 |
+| Fast Sync `write()` only | 1 (用户→内核) | **无** |
+| `sendfile()` (未采用) | 0 | 有 |
+
+**原因 3：TLS 默认开启，阻止内核态零拷贝**
+
+KeyDB 默认 `BUILD_TLS=yes`。`sendBulkToSlave()` 注释明确声明：
+
+> `/* try to use sendfile system call if supported, unless tls is enabled. fallback to normal read+write otherwise. */`
+
+TLS 加密必须在用户态完成（加密、封装 TLS record），数据必须先读到用户态内存 → 加密 → 再写回 socket。无法走内核态的 sendfile，所以即使有 RDB 文件 fd，TLS 场景下也只能用 `read()` + `connWrite()`。
+
+**原因 4：即使 RDB 文件路径，数据量级不同**
+
+传统 RDB 同步路径：子进程 fork → 写 RDB 到磁盘/pipe → 父进程 `sendBulkToSlave()` 用 `read()` + `connWrite()`（`PROTO_IOBUF_LEN` = 16KB buffer）。KeyDB 的 RDB 通常在 MB~GB 级别，远小于分布式存储，16KB 粒度的用户态读写在现代 CPU 上开销极低。
+
+### 10.3 两种复制模式
+
+**传统模式 (raw protocol forwarding)**：
+- master 把命令序列化为 `*N\r\n$L\r\n...` RESP 字节流
+- 通过 `feedReplicationBacklog()` 写 backlog + `addReply` 推送 slave output buffer
+- slave event loop: `readQueryFromClient` → `processInputBuffer` 读取执行
+- slave 连接就是普通 `client` + `CLIENT_SLAVE` flag，与普通客户端共用事件循环
+
+**Active Replication 模式 (RREPLAY)**：
+- master 封装命令为 `RREPLAY <uuid> <cmd_buf> [dbid] [mvcc]`
+- UUID 用于 multi-master 去重，MVCC timestamp 用于幂等和乱序检测
+- 接收端 `replicaReplayCommand()`: 提取 cmd_buf → 注入 fake client querybuf → `processInputBuffer` 执行
+- `alsoPropagate()` 在 multi-master 拓扑中继续转发
+
+### 10.4 syncWithMaster 连接建立状态机
+
+```
+REPL_STATE_CONNECTING → REPLPING/PING
+  → REPL_STATE_RECEIVE_PING_REPLY → +PONG
+  → REPL_STATE_SEND_HANDSHAKE → AUTH + REPLCONF
+  → REPL_STATE_RECEIVE_AUTH_REPLY → ...
+  → REPL_STATE_SEND_PSYNC → PSYNC <replid> <offset>
+  → REPL_STATE_RECEIVE_PSYNC_REPLY → +CONTINUE(增量) 或 +FULLRESYNC(全量)
+  → (全量) readSyncBulkPayload → 接收 RDB/快照
+  → REPL_STATE_CONNECTED → 持续接收命令流
+```
+
+### 10.5 拷贝路径对照
+
+**RDB 全量同步（传统路径）**：
+```
+RDB 文件 on disk
+  → read(fd, buf, PROTO_IOBUF_LEN)  ← 内核→用户态拷贝 (1)
+  → sendBulkToSlave() → connSocketWrite() → write(fd, buf, len) ← 用户态→内核拷贝 (2)
+  → 内核 socket send buffer → TCP/IP 协议栈 (sk_buff 分配、分段等) → DMA → NIC
+```
+共 2 次跨态拷贝 + 磁盘 I/O。
+
+**Fast Sync 全量同步**：
+```
+内存 redisObject
+  → RESP 序列化 → replicationBuffer::addData() → memcpy → reply->buf()  (用户态构造)
+  → flushData() → addReplyProto → client reply 链
+  → sendReplyToClient → connSocketWrite() → write(fd, buf, len) ← 用户态→内核拷贝 (1)
+  → 内核 socket send buffer → TCP/IP 协议栈 → DMA → NIC
+```
+共 1 次跨态拷贝（write syscall），没有磁盘 I/O。
+
+**sendfile（KeyDB 未采用，TLS 下不可用）**：
+```
+RDB 文件 on disk
+  → sendfile(socket_fd, file_fd, &offset, count)  ← 内核内部直接传输，无用户态参与
+  → 内核 socket send buffer → TCP/IP → NIC
+```
+共 0 次跨态拷贝。节省了 CPU，但需文件 fd + 不能加密。
+
+**结论**：Fast Sync 优化的本质是去掉**磁盘 I/O 和一次 read() 拷贝**，而非消除协议栈拷贝。TCP socket 的 `write()` 系统调用必然触发用户→内核拷贝——这是所有用户态程序的硬限制。真正能绕过这一层的只有 `sendfile()`/`splice()`，但它们要求数据源头是文件描述符（内核态），且与 TLS 互斥。
+
+### 10.6 总结对照
+
+| 方面 | 分布式存储 (Ceph) | KeyDB |
+|------|-------------------|-------|
+| 数据来源 | 磁盘 (块/对象) | 内存 (KV) |
+| 单次传输量 | MB~GB 级 | 几十B~KB (命令) / MB级 (全量) |
+| 常规复制路径 | 磁盘→socket (可选零拷贝) | 内存→socket (1次 write() 拷贝) |
+| 全量同步优化 | sendfile/splice: 0 次跨态拷贝 | Fast Sync: 1 次跨态拷贝, 无磁盘 I/O |
+| 零拷贝适用性 | ✅ (数据在磁盘, 有 fd) | ❌ (数据在内存, `write()` 拷贝不可避免) |
+| TLS | 内部网络常不用 | 默认开启, 阻止 sendfile |
+| 协议层 | 独立 Messenger 层 | 复制=普通 client + flag |
+
+---
+
 ## 参考资料
 
 - [阿里云 Tair 产品概述](https://help.aliyun.com/zh/redis/product-overview/what-is-apsaradb-for-redis)

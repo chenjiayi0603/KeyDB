@@ -6,16 +6,15 @@ services:
       dockerfile: docker/Dockerfile
     image: keydb-flash:latest
     container_name: keydb-master
-    hostname: keydb-master
-    ports:
-      - "6379:6379"
+    network_mode: host
     volumes:
       - ./conf/keydb-master.conf:/etc/keydb/keydb.conf:ro
       - keydb_master_data:/data
-    networks:
-      - keydb-net
+    command: >
+      /etc/keydb/keydb.conf
+      --port 6379
     healthcheck:
-      test: ["CMD", "keydb-cli", "ping"]
+      test: ["CMD", "keydb-cli", "-p", "6379", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -25,22 +24,19 @@ services:
   keydb-replica-1:
     image: keydb-flash:latest
     container_name: keydb-replica-1
-    hostname: keydb-replica-1
-    ports:
-      - "6380:6379"
+    network_mode: host
     volumes:
       - ./conf/keydb-replica.conf:/etc/keydb/keydb.conf:ro
       - keydb_replica1_data:/data
-    networks:
-      - keydb-net
     command: >
       /etc/keydb/keydb.conf
-      --replicaof keydb-master 6379
+      --port 6380
+      --replicaof 127.0.0.1 6379
     depends_on:
       keydb-master:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "keydb-cli", "ping"]
+      test: ["CMD", "keydb-cli", "-p", "6380", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -50,22 +46,19 @@ services:
   keydb-replica-2:
     image: keydb-flash:latest
     container_name: keydb-replica-2
-    hostname: keydb-replica-2
-    ports:
-      - "6381:6379"
+    network_mode: host
     volumes:
       - ./conf/keydb-replica.conf:/etc/keydb/keydb.conf:ro
       - keydb_replica2_data:/data
-    networks:
-      - keydb-net
     command: >
       /etc/keydb/keydb.conf
-      --replicaof keydb-master 6379
+      --port 6381
+      --replicaof 127.0.0.1 6379
     depends_on:
       keydb-master:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "keydb-cli", "ping"]
+      test: ["CMD", "keydb-cli", "-p", "6381", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5
@@ -75,7 +68,3 @@ volumes:
   keydb_master_data:
   keydb_replica1_data:
   keydb_replica2_data:
-
-networks:
-  keydb-net:
-    driver: bridge
