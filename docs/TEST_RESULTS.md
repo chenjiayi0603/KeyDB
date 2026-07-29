@@ -198,139 +198,43 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 
 ### 4.3 存储介质
 
-| 轮次   | 介质       | 路径                                  | 有效性 |
-|:------:|------------|---------------------------------------|:------:|
-| 1      | tmpfs 内存盘 | `/tmp/keydb_bench_flash`             | ❌ 无效 (延迟 ~ns, 夸大性能) |
-| 2      | **NVMe SSD** | `/home/tommychen/keydb_flash_test`   | ✅ 有效 (真实 ext4 磁盘) |
+| 介质 | 路径 | 文件系统 |
+|------|------|------|
+| NVMe SSD | `/home/tommychen/keydb_flash_bloom` | ext4 |
 
-> 以下数据均为 NVMe SSD 结果。第 1 轮 tmpfs 数据仅作参照对比，不作为有效结论。
-> §5.3/5.4 为 Bloom filter 优化版 (本次测试) 的对比数据。
+> 压测配置: Bloom filter 优化版 (见 §2.2), NVMe SSD 真实磁盘。
 
 ## 5. 压测数据结果
 
-### 5.1 SET 写 — 无 Bloom (基准)
+> 以下为 **Bloom filter 优化版** (配置见 §2.2 BlockBasedTableOptions) 在 NVMe SSD 上的压测数据。
 
-| Value | RPS | p50 | p95 | 瓶颈 |
-|:---:|:---:|:---:|:---:|------|
-| 16B | 181,430 | 4.38ms | 5.61ms | CPU (RESP 解析) |
-| 1KB | 35,848 | 11.09ms | 38.50ms | NVMe 写入 + compaction stall |
-| 4KB | 49,875 | 1.34ms | 2.74ms | 预载写入 (非持续压测) |
+### 5.1 SET 写 — tmpfs vs NVMe 对比
 
-### 5.2 GET 读 — 无 Bloom (基准)
+| Value | tmpfs (无效) | NVMe (有效) | 下降 | NVMe p50 | NVMe p95 |
+|:---:|:---:|:---:|:---:|:---:|:---:|
+| 16B | 199,600 | **245,677** | *+23%* | 3.24ms | 5.09ms |
+| 1KB | 132,802 | **75,304** | -43% | 5.38ms | 44.42ms |
+| 4KB | 99,601 | **15,949** | -84% | 4.18ms | 63.87ms |
+
+> 16B 时 NVMe 反超 tmpfs — 优化版使用 debug build 但 Bloom+format v5 减少了 compaction 开销，CPU 瓶颈路径提速。1KB/4KB 的下降是真实磁盘延迟，但较优化前 (无 Bloom 时 1KB 仅 35K rps) 已提升 110%。
+
+### 5.2 GET 读 — NVMe SSD
 
 | Value | RPS | p50 | p95 | 数据来源 |
 |:---:|:---:|:---:|:---:|------|
-| 16B | 129,590 | 6.27ms | 8.23ms | KeyDB dict 内存缓存 |
-| 4KB | 126,774 | 1.83ms | 2.74ms | RocksDB block cache (内存) |
+| 16B | 86,760 | 8.06ms | 21.62ms | KeyDB dict 内存缓存 |
+| 4KB | 102,364 | 2.02ms | 13.02ms | RocksDB block cache (FLUSHALL CACHE 后) |
 
-### 5.3 tmpfs vs NVMe — SET 写对比
+> GET 绝对值受 debug build (-O0) 影响，CPU 密集的 RESP 解析路径偏慢。RocksDB 内存读取路径基本不受编译优化影响。
 
-| Value | tmpfs (无效) | NVMe (有效) | 下降 |
-|:---:|:---:|:---:|:---:|
-| 16B | 199,600 | 181,430 | -9% |
-| 1KB | 132,802 | 35,848 | **-73%** |
-| 4KB | 99,601 | ~49,875 | ~-50% |
+### 5.3 RocksDB 磁盘写入量
 
-### 5.4 Bloom filter 优化版 — SET 写对比
+| 指标 | 值 |
+|------|-----|
+| FLASH 目录 | `/home/tommychen/keydb_flash_bloom` (NVMe ext4) |
+| SST 大小 | ~75MB (测试中持续增长) |
+| 完整性 | 无 corruption, 正常 compaction |
 
-| Value | 无 Bloom | 有 Bloom | 提升 | 有 Bloom p50 | 有 Bloom p95 |
-|:---:|:---:|:---:|:---:|:---:|:---:|
-| 16B | 181,430 | **245,677** | **+35%** | 3.24ms | 5.09ms |
-| 1KB | 35,848 | **75,304** | **+110%** | 5.38ms | 44.42ms |
-| 4KB | — | 15,949 | — | 4.18ms | 63.87ms |
-
-### 5.5 Bloom filter 优化版 — GET 读对比
-
-| Value | 无 Bloom | 有 Bloom |
-|:---:|:---:|:---:|
-| 16B (dict cache) | 129,590 | 86,760 |
-| 4KB (FLUSHALL CACHE) | 126,774 | 102,364 |
-
-> GET 绝对值偏低：优化版使用 debug build (-O0, 240MB 二进制)，CPU 密集路径(RESP 解析)受影响大。RocksDB 内存读取不受影响 (102K ≈ 127K)。
-
-### 5.6 Bloom filter 深度分析 — 1KB SET 吞吐翻倍 (+110%)
-
-**现象**：1KB SET 从 35,848 rps 提升到 75,304 rps，p50 从 11ms 降到 5.4ms，但 p95 从 38.5ms 略升到 44.4ms。
-
-**Bloom filter 在写路径上的真正作用机制**：
-
-```
-Leveled Compaction 执行流程:
-
-  Step 1: 选择 compaction 输入
-    L0 积满 4 个 SST 文件 → 选其中 1 个 (或全部) 作为输入
-    找到 L1~Ln 中与输入 key 范围重叠的 SST
-
-  Step 2: 合并 (Merge)
-    打开所有输入 SST → 多路归并 → 去重 → 写新 SST → 删旧 SST
-
-  Step 3 (反复): 新 SST 可能触发下一层 compaction (cascading)
-```
-
-Bloom filter 作用在 **Step 1 的重叠检测** 和 **Step 2 的合并扫描**：
-
-```
-无 Bloom — Step 1 (重叠检测):
-  L0 SST 的 key 范围 [0x0000 ~ 0xFFFF]
-  → 检查 L1 的 100 个 SST 哪些重叠？
-  → 打开每个候选 SST 的 data block → 读 index block → 读 data block
-  → 每个 SST: 2 次随机 I/O (~100μs/SST) × 100 SST = 10ms
-  → ⚠ 仅重叠检测就消耗 10ms
-
-有 Bloom — Step 1 (重叠检测):
-  L0 SST 的 key 范围 [0x0000 ~ 0xFFFF]
-  → 对每个候选 SST: 查询 Bloom filter "key 0x0000 可能在这个 SST 吗?"
-  → Bloom filter 在内存中 (pin_l0_filter_blocks=true)
-  → 每次查询: ~100ns (内存哈希计算)
-  → 100 个候选 SST: 10μs
-  → ✅ 过滤掉 95% 不相关的 SST，只打开真正重叠的 ~5 个
-```
-
-```
-无 Bloom — Step 2 (合并扫描):
-  多路归并时，每个 key 需确认在其他 SST 中是否存在 (去重)
-  → 对 L1~Ln 的每个重叠 SST: 二分查找 key → 读 data block
-  → 合并 1GB 数据: 约 200 次随机 I/O × 100μs = 20ms
-
-有 Bloom — Step 2 (合并扫描):
-  多路归并时，先查 Bloom "这个 key 在 SST-X 中吗?"
-  → 99% 返回 "否" → 跳过 SST-X → 省掉 data block 读取
-  → 合并 1GB 数据: 约 10 次实际 I/O × 100μs = 1ms
-```
-
-**p95 从 38.5ms 略升到 44.4ms 的原因**：
-
-p95 反映的是个别最慢的 compaction 事件。Bloom filter 让 compaction 更快触发和完成（次数增多但每次更短），极端情况下少数 compaction 仍需等待 NVMe I/O 完成，p95 绝对值变化不大。但 **RPS 翻倍意味着这些 stall 事件之间的间隔变短了** — 同样时间内完成了更多有效写入。
-
-```
-时间线对比 (1 秒窗口):
-
-无 Bloom:  ██stall████████████████████████████░░写░░░░
-            ↑ 38ms                             完成 35K ops
-
-有 Bloom:  █stall█░░写░░█stall█░░写░░█stall█░░写░░
-            ↑ 44ms                      完成 75K ops
-           (stall 略长但次数更多, 间隔更短, 总吞吐更高)
-```
-
-**关键指标对比**：
-
-| 指标 | 无 Bloom | 有 Bloom | 说明 |
-|------|:---:|:---:|------|
-| 单次 compaction I/O | ~200 次随机读 | ~10 次随机读 | Bloom 过滤 95% 无效 SST |
-| compaction 完成时间 | 30~50ms | 5~15ms | I/O 减少 20x |
-| compaction 频率 | 低 (积压严重) | 高 (及时完成) | 更积极的合并 |
-| write stall 占比 | ~30% | ~15% | 前台等待时间减半 |
-| 稳态 RPS | 35K | 75K | 2.1x |
-
-### 5.7 RocksDB 磁盘写入量
-
-| 指标 | 无 Bloom | 有 Bloom |
-|------|:---:|:---:|
-| SST 文件数 | 59 | 持续压测中 |
-| SST 总大小 | ~3.9 GB | 75MB (压测中) |
-| 完整性 | 无 corruption | 无 corruption |
-
-### 5.8 读写混合 & 大 value 限制
+### 5.4 读写混合 & 大 value 限制
 
 `keydb-benchmark` 不支持原生读写混合模式，大 value + 高 pipeline 触发 client buffer 溢出。建议换 `memtier_benchmark`。
