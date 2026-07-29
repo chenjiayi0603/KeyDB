@@ -241,10 +241,10 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 
 | 场景 | NVMe RPS | NVMe p50 | tmpfs RPS | tmpfs p50 | RPS 差异 |
 |------|:---:|:---:|:---:|:---:|:---:|
-| GET 1KB | **539,898** | 1.41ms | 434,103 | 1.82ms | +24% |
-| GET 1KB (FLUSHALL CACHE) | **545,256** | 0.44ms | 363,284 | 0.63ms | +50% |
+| GET 1KB | 475,511 | 1.30ms | **570,645** | 1.38ms | -17% |
+| GET 1KB (FLUSHALL CACHE) | — | — | — | — | — |
 
-> 测试条件: maxmemory 512MB 满载, eviction 持续, 数据量 < 32GB RAM, GET 命中内存缓存。
+> 测试条件: 同批预载 80 万 key, maxmemory 512MB 满载, eviction 持续。tmpfs 快 17%，差异来自 eviction 时 NVMe 有实际磁盘 I/O 拖慢 dict cache 更新。
 
 ### 5.4 混合读写 — NVMe vs tmpfs
 
