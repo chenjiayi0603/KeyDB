@@ -36,7 +36,7 @@
 | 参数                              | 值                       | 说明 |
 |-----------------------------------|-------------------------|------|
 | 版本                              | 7.10.2                   | 静态链接 `librocksdb.a` |
-| compaction_style                  | **Leveled** (默认)        | 压实算法: 分层合并 |
+| compaction_style                  | **Leveled** (默认)         | RocksDB: `kCompactionStyleLevel`. Tiered/Universal = `kCompactionStyleUniversal` |
 | level_compaction_dynamic_level_bytes | true                   | 动态层级大小 |
 | max_background_compactions        | 4                        | 后台压实线程数 |
 | max_background_flushes            | 2                        | 后台刷盘线程数 |
@@ -63,6 +63,59 @@
 | target_file_size_base             | 64MB (RocksDB 默认)        | 每层 SST 文件目标大小 |
 
 > **level_compaction_dynamic_level_bytes = true**: RocksDB 自动计算最优层数。从磁盘容量的 90% 开始反向推算 (×10缩小)，通常 3~5 层。例如 500GB 盘 → Lmax≈450GB, L4=45GB, L3=4.5GB, L2=450MB → 4 层。测试数据 ~3.9GB 时大约 3 层。
+>
+> **Leveled vs Tiered (Universal) 对比**:
+>
+> | 特性 | Leveled (当前) | Tiered/Universal |
+> |------|:---:|:---:|
+> | 层/tier 数量 | **多** (3~7 层) | **少** (2~3 tier) |
+> | 同层 key 范围 | 互不重叠 (partition) | **可重叠** (每个 tier 是独立 sorted run) |
+> | 空间放大 | **低 (~1.11x)** | 高 (~2x) |
+> | 写放大 | 高 (数据被反复合并搬移) | **低** (数据搬移少) |
+> | 读放大 | **低** (每层最多查 1 个 SST) | 高 (需搜索多个重叠 tier) |
+> | 适合场景 | 读多写少 / 需要低空间放大 | 写密集 / 大 value 批量写入 |
+>
+> **为什么 Tiered 层数少但空间放大更高？—— 数学推导 + 图释**
+>
+> 核心区别：**Leveled 下沉即删除，Tiered 下沉不删**。
+>
+> ```
+> Leveled: 同一个 key 只在一层存在                  Tiered: 同一个 key 在多个 Run 并存
+>
+> 写入 foo:v1                                     写入 foo:v1
+>   ↓                                               ↓
+> L0: [foo:v1]                                    Run0: [foo:v1]
+>   ↓ compaction: foo 下沉到 L1                     ↓ Run0 满了, 开新 Run
+> L1: [foo:v1]                                    Run0: [foo:v1]   ← 还在!
+> L0: (空) ← 旧 SST 已删除                         Run1: [foo:v2]   ← 新版本
+>
+> 更新 foo→v2                                     更新 foo→v3
+>   ↓                                               ↓
+> L0: [foo:v2]                                    Run0: [foo:v1]   ← 还在!
+> L1: [foo:v1] ← 两个版本在不同层,不重复             Run1: [foo:v2]   ← 还在!
+>   ↓ compaction: v2 下沉覆盖 v1                    Run2: [foo:v3]   ← 最新
+> L0: (空)                                        三个 Run 都有 "foo",
+> L1: [foo:v2] ← 只剩最新版, 旧版随 SST 删除        合并前同时占用磁盘空间
+> ```
+>
+> 数学推导：
+>
+> ```
+> Leveled (T=10):                                Tiered (R=2):
+>
+> L0:  1x  (新写入,未排序)                         Run 0: R   = 1x  (最新写入)
+> L1:  1x                                         Run 1: R   = 1x  (上一批)
+> L2:  10x                                        ─── R+R → 2x 合并 ──→
+> L3:  100x                                       Run 2: 2R  = 2x  (合并后)
+> L4:  1000x                                      Run 3: 4R  = 4x
+>                                                 Run 4: 8R  = 8x
+> 总大小 = 1+1+10+100+1000 = 1112
+> 最底层  = 1000                                   总大小 = R+R+2R+4R+8R = 16R
+> 空间放大 = 1112/1000 ≈ 1.11x                     最底层  = 8R
+>                                                 空间放大 = 16R/8R = 2.0x
+> ```
+>
+> **KeyDB 为什么用 Leveled**：默认值，适合 Redis 类 KV 的读多写少模式。但 FLASH 场景下 value 较大时，写放大会恶化——1KB value 在 compaction 中可能要搬移多次，放大到 5-10KB 的实际磁盘写入量。
 
 ## 3. 编译方式
 
