@@ -210,22 +210,20 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 
 ### 5.1 SET 写 — tmpfs vs NVMe 对比
 
-| Value | tmpfs (无效) | NVMe (有效) | 下降 | NVMe p50 | NVMe p95 |
+| Value | tmpfs RPS | NVMe RPS | 差异 | NVMe p50 | NVMe p95 |
 |:---:|:---:|:---:|:---:|:---:|:---:|
-| 16B | 199,600 | **245,677** | *+23%* | 3.24ms | 5.09ms |
+| 16B | 199,600 | **245,677** | +23% | 3.24ms | 5.09ms |
 | 1KB | 132,802 | **75,304** | -43% | 5.38ms | 44.42ms |
 | 4KB | 99,601 | **15,949** | -84% | 4.18ms | 63.87ms |
 
-> 16B 时 NVMe 反超 tmpfs — 优化版使用 debug build 但 Bloom+format v5 减少了 compaction 开销，CPU 瓶颈路径提速。1KB/4KB 的下降是真实磁盘延迟，但较优化前 (无 Bloom 时 1KB 仅 35K rps) 已提升 110%。
+### 5.2 GET 读 — tmpfs vs NVMe 对比
 
-### 5.2 GET 读 — NVMe SSD
+| Value | tmpfs RPS | tmpfs p50 | tmpfs p95 | NVMe RPS | NVMe p50 | NVMe p95 | 差异 | 数据来源 |
+|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|------|
+| 16B | 768,521 | 0.98ms | 1.42ms | **86,760** | 8.06ms | 21.62ms | -89% | dict 内存缓存 |
+| 4KB | 444,148 | 0.49ms | 0.84ms | **102,364** | 2.02ms | 13.02ms | -77% | RocksDB block cache |
 
-| Value | RPS | p50 | p95 | 数据来源 |
-|:---:|:---:|:---:|:---:|------|
-| 16B | 86,760 | 8.06ms | 21.62ms | KeyDB dict 内存缓存 |
-| 4KB | 102,364 | 2.02ms | 13.02ms | RocksDB block cache (FLUSHALL CACHE 后) |
-
-> GET 绝对值受 debug build (-O0) 影响，CPU 密集的 RESP 解析路径偏慢。RocksDB 内存读取路径基本不受编译优化影响。
+> tmpfs 的 GET 全部命中内存 (ns 级延迟)，NVMe 虽然数据也在内存 (block cache)，但 debug build 的 RESP 解析路径拖慢了吞吐。两者的实际 I/O 路径都未触及磁盘。
 
 ### 5.3 RocksDB 磁盘写入量
 
