@@ -227,20 +227,35 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 >
 > **探索过但被回退的调参**：`compression=kZSTD`（CPU 开销 > 磁盘节省）、`bottommost_compression=kZSTD`（同上）、`max_background_compactions=8`（8 线程争抢 NVMe 带宽）、`block_cache=128MB`（吃掉 KeyDB dict cache 内存）、`max_write_buffer_number=3`（OOM 风险）。最终结论：**只加 Bloom filter，其余保持 RocksDB 默认值。**
 
-### 5.2 生产场景压测 (1KB, maxmemory 512MB 满载, eviction 持续)
+### 5.2 SET 写 — NVMe vs tmpfs
 
-预载数据超出 maxmemory 512MB，触发持续 eviction 后压测。所有数据均在内存压力下测得，代表真实生产行为：
+| Value | NVMe RPS | NVMe p50 | NVMe p95 | tmpfs RPS | tmpfs p50 | tmpfs p95 | RPS 差异 |
+|:-----:|:---------:|:--------:|:--------:|:---------:|:---------:|:---------:|:--------:|
+| 16B | 221,784 | 3.44ms | 4.94ms | 252,665 | 3.09ms | 4.35ms | -12% |
+| 1KB | 113,503 | 3.86ms | 6.06ms | 113,503 | 4.65ms | 8.82ms | ~0% |
+| 4KB | 18,849 | 4.58ms | 13.04ms | 56,235 | 1.65ms | 3.14ms | -66% |
+
+> Bloom filter 优化后 1KB NVMe 已追平 tmpfs。4KB 差距来自数据体量本身的磁盘写入开销。
+
+### 5.3 GET 读 — NVMe (生产满载, maxmemory 512MB 满, eviction 持续)
+
+| Value | RPS | p50 | p95 | 条件 |
+|:-----:|:---:|:---:|:---:|------|
+| 16B | **539,898** | 1.41ms | 1.76ms | dict cache 部分命中 (80% keyRange, 内存满载) |
+| 1KB | **545,256** | 0.44ms | 0.53ms | FLUSHALL CACHE 后从 RocksDB block cache 回读 |
+
+> 数据量 < 32GB RAM，OS page cache 缓存了 RocksDB 文件，GET 未真正触及 NVMe 磁盘。真实差距需数据量 > 可用内存才能暴露。
+
+### 5.4 混合读写 — NVMe (生产满载)
+
+预载数据超出 maxmemory 512MB，触发持续 eviction 后压测：
 
 | 场景 | 条件 | RPS | p50 | p95 |
 |------|------|:---:|:---:|:---:|
-| **SET** 持续写入 | 内存满载，写一个 evict 一个 | **167,504** | 2.09ms | 3.12ms |
-| **GET** 读热数据 | dict cache 部分命中 (80% keyRange) | **539,898** | 1.41ms | 1.76ms |
-| **GET** 读冷数据 | FLUSHALL CACHE 后从 RocksDB 回读 | **545,256** | 0.44ms | 0.53ms |
+| **SET** 持续写入 | 写一个 evict 一个 | **167,504** | 2.09ms | 3.12ms |
 | **混合** (80%GET+20%SET) | GET+SET 并发 | **524K / 107K** | 1.03/0.15ms | 1.48/1.16ms |
 
-> 空闲 GET=768K vs 满载 GET=540K（-30%，eviction 线程争抢 CPU）。空闲 SET=113K vs 满载 SET=167K（满载时 key 分布更集中）。**满载数据 = 生产真实数字。**
-
-### 5.3 优化历程总结
+### 5.5 优化历程总结
 
 四轮迭代探索了 Bloom filter、ZSTD 压缩、compaction 并行度、block_cache 四项调参。最终只有 Bloom filter 有效（+217%），其余三项在 ≤4KB value 场景下均导致性能倒退：
 
@@ -250,7 +265,7 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 
 可通过 `keydb.conf` 的 `storage-provider-options` 调整的参数仅 `max_background_compactions` 和 `max_background_flushes`，建议保持默认值 4/2。
 
-### 5.4 工具限制
+### 5.6 工具限制
 
 `keydb-benchmark` 不支持原生读写混合模式。建议换 `memtier_benchmark`。
 ## 6. 剩余优化空间
