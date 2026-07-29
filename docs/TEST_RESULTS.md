@@ -212,15 +212,15 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 
 ### 5.1 优化项及效果 (SET 写, NVMe, 1KB value)
 
-| 配置项 | 位置 | 原始值 | 优化值 | 作用 | 1KB RPS | 提升 |
-|--------|------|:---:|:---:|------|:---:|:---:|
-| filter_policy | `rocksdbfactory.cpp` | (无) | NewBloomFilterPolicy(10) | 布隆过滤器, compaction 时快速排除不重叠 SST | 35,848 → **113,503** | **+217%** |
-| optimize_filters_for_memory | `rocksdbfactory.cpp` | false | true | 减少 filter 内存占用 | ↑ | — |
-| optimize_filters_for_hits | `rocksdbfactory.cpp` | false | true | 优化 filter 层级放置 (缓存命中率高时) | ↑ | — |
-| format_version | `rocksdbfactory.cpp` | 4 | 5 | v5 支持分区 filter/index | ↑ | — |
-| block_cache | `rocksdbfactory.cpp` | 8MB | 128MB | 增大 block cache, 减少磁盘读 | ↑ | — |
-| pin_l0_filter_and_index_blocks_in_cache | `rocksdbfactory.cpp` | false | true | L0 filter 固定缓存不被淘汰 | ↑ | — |
-| cache_index_and_filter_blocks | `rocksdbfactory.cpp` | false | true | filter 按 LRU 淘汰, 避免永久占内存 | ↑ | — |
+| 配置项                                     | 位置                    | 原始值 | 优化值                    | 作用                                       | 1KB RPS                   | 提升     |
+|--------------------------------------------|-------------------------|:------:|:-------------------------:|--------------------------------------------|:-------------------------:|:--------:|
+| filter_policy                              | `rocksdbfactory.cpp`    | (无)   | NewBloomFilterPolicy(10)  | 布隆过滤器, compaction 快速排除不重叠 SST    | 35,848 → **113,503**       | **+217%** |
+| optimize_filters_for_memory                | `rocksdbfactory.cpp`    | false  | true                      | 减少 filter 内存占用                         | ↑                         | —        |
+| optimize_filters_for_hits                  | `rocksdbfactory.cpp`    | false  | true                      | 优化 filter 层级放置 (缓存命中率高时)         | ↑                         | —        |
+| format_version                             | `rocksdbfactory.cpp`    | 4      | 5                         | v5 支持分区 filter/index                     | ↑                         | —        |
+| block_cache                                | `rocksdbfactory.cpp`    | 8MB    | 128MB                     | 增大 block cache, 减少磁盘读                 | ↑                         | —        |
+| pin_l0_filter_and_index_blocks_in_cache    | `rocksdbfactory.cpp`    | false  | true                      | L0 filter 固定缓存不被淘汰                   | ↑                         | —        |
+| cache_index_and_filter_blocks              | `rocksdbfactory.cpp`    | false  | true                      | filter 按 LRU 淘汰, 避免永久占内存            | ↑                         | —        |
 
 > 原始代码中 `data_block_index_type=kDataBlockBinaryAndHash`、`block_size=16KB`、`checksum=kNoChecksum` 已在本次优化前设置，非本次新增。
 
