@@ -238,20 +238,29 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 
 > ⚠️ 以上为空闲服务器数据（数据量 < maxmemory，无 eviction）。**生产环境满载数据见 §5.3。**
 
-### 5.3 生产场景模拟 (1KB value, maxmemory 512MB 满载, eviction 持续)
+### 5.3 GET 读 — NVMe vs tmpfs (空闲服务器)
 
-预载 800K 个 key (~800MB) 超出 maxmemory 512MB，触发持续 eviction 后再压测：
+| Value | NVMe RPS | NVMe p50 | NVMe p95 | tmpfs RPS | tmpfs p50 | tmpfs p95 | RPS 差异 |
+|:-----:|:---------:|:--------:|:--------:|:---------:|:---------:|:---------:|:--------:|
+| 16B | 768,167 | 0.99ms | 1.27ms | 768,521 | 0.98ms | 1.42ms | -0% |
+| 4KB | — | — | — | 444,148 | 0.49ms | 0.84ms | — |
+
+> ⚠️ 空闲服数据，生产满载见 §5.4。
+
+### 5.4 生产场景模拟 — SET + GET (1KB, 内存满载 eviction 持续)
+
+预载 800K 个 key (~800MB) 超出 maxmemory 512MB，触发持续 eviction 后压测：
 
 | 场景 | 条件 | RPS | p50 | p95 |
 |------|------|:---:|:---:|:---:|
-| 持续写入 | 内存满载，写一个 evict 一个 | **167,504** | 2.09ms | 3.12ms |
-| 读热数据 (80% keyRange) | dict cache 部分命中，部分回读 RocksDB | **539,898** | 1.41ms | 1.76ms |
-| 读冷数据 (FLUSHALL CACHE) | 全部从 RocksDB block cache 回读 | **545,256** | 0.44ms | 0.53ms |
-| 混合读写 (80%GET + 20%SET) | GET=524K, SET=107K 并发 | **524K / 107K** | 1.03 / 0.15ms | 1.48 / 1.16ms |
+| **SET** 持续写入 | 内存满载，写一个 evict 一个 | **167,504** | 2.09ms | 3.12ms |
+| **GET** 读热数据 | dict cache 部分命中 (80% keyRange) | **539,898** | 1.41ms | 1.76ms |
+| **GET** 读冷数据 | FLUSHALL CACHE 后从 RocksDB 回读 | **545,256** | 0.44ms | 0.53ms |
+| **混合** (80%GET+20%SET) | GET+SET 并发 | **524K / 107K** | 1.03/0.15ms | 1.48/1.16ms |
 
-> 与之前 §5.2 的"空闲服测试"对比：空闲时 SET=113K，满载时 SET=167K（差异来自 key 分布和 eviction 时机）。GET 空闲 768K vs 满载 540K（-30%，eviction 线程争抢 CPU）。**这才是 FLASH 生产环境的真实数字，不是美化后的最好情况。**
+> 空闲 GET=768K vs 满载 GET=540K（-30%，eviction 线程争抢 CPU）。空闲 SET=113K vs 满载 SET=167K（满载时 key 分布更集中）。**满载数据 = 生产真实数字。**
 
-### 5.4 优化历程总结
+### 5.5 优化历程总结
 
 四轮迭代探索了 Bloom filter、ZSTD 压缩、compaction 并行度、block_cache 四项调参。最终只有 Bloom filter 有效（+217%），其余三项在 ≤4KB value 场景下均导致性能倒退：
 
@@ -261,7 +270,7 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 
 可通过 `keydb.conf` 的 `storage-provider-options` 调整的参数仅 `max_background_compactions` 和 `max_background_flushes`，建议保持默认值 4/2。
 
-### 5.5 读写混合 & 大 value 限制
+### 5.6 读写混合 & 大 value 限制
 
 `keydb-benchmark` 不支持原生读写混合模式。建议换 `memtier_benchmark`。
 ## 6. 剩余优化空间
