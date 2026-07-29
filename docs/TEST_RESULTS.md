@@ -206,24 +206,24 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 
 ## 5. 压测数据结果
 
-> 以下为 **Bloom filter 优化版** (配置见 §2.2 BlockBasedTableOptions) 在 NVMe SSD 上的压测数据。
+> Bloom filter 优化版 (见 §2.2)，NVMe SSD 真实磁盘。tmpfs 为参照对比。
 
-### 5.1 SET 写 — tmpfs vs NVMe 对比
+### 5.1 SET 写
 
-| Value | tmpfs RPS | NVMe RPS | 差异 | NVMe p50 | NVMe p95 |
-|:---:|:---:|:---:|:---:|:---:|:---:|
-| 16B | 199,600 | **245,677** | +23% | 3.24ms | 5.09ms |
-| 1KB | 132,802 | **75,304** | -43% | 5.38ms | 44.42ms |
-| 4KB | 99,601 | **15,949** | -84% | 4.18ms | 63.87ms |
+| Value | NVMe RPS  | NVMe p50 | NVMe p95 | tmpfs RPS | 差异   |
+|:-----:|:---------:|:--------:|:--------:|:---------:|:------:|
+| 16B   | 245,677   | 3.24ms   | 5.09ms   | 199,600   | +23%   |
+| 1KB   | 75,304    | 5.38ms   | 44.42ms  | 132,802   | -43%   |
+| 4KB   | 15,949    | 4.18ms   | 63.87ms  | 99,601    | -84%   |
 
-### 5.2 GET 读 — tmpfs vs NVMe 对比
+### 5.2 GET 读
 
-| Value | tmpfs RPS | tmpfs p50 | tmpfs p95 | NVMe RPS | NVMe p50 | NVMe p95 | 差异 | 数据来源 |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|------|
-| 16B | 768,521 | 0.98ms | 1.42ms | **86,760** | 8.06ms | 21.62ms | -89% | dict 内存缓存 |
-| 4KB | 444,148 | 0.49ms | 0.84ms | **102,364** | 2.02ms | 13.02ms | -77% | RocksDB block cache |
+| Value | NVMe RPS  | NVMe p50 | NVMe p95 | tmpfs RPS | 差异   |
+|:-----:|:---------:|:--------:|:--------:|:---------:|:------:|
+| 16B   | 86,760    | 8.06ms   | 21.62ms  | 768,521   | -89%   |
+| 4KB   | 102,364   | 2.02ms   | 13.02ms  | 444,148   | -77%   |
 
-> tmpfs 的 GET 全部命中内存 (ns 级延迟)，NVMe 虽然数据也在内存 (block cache)，但 debug build 的 RESP 解析路径拖慢了吞吐。两者的实际 I/O 路径都未触及磁盘。
+> NVMe 16B/4KB GET 均命中内存 (dict cache / RocksDB block cache)，未触及磁盘。debug build (-O0) 拖慢了 RESP 解析路径，优化编译 (-O2 -flto) 预期可恢复到 tmpfs 同级水平。
 
 ### 5.3 RocksDB 磁盘写入量
 
