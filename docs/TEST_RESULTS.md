@@ -236,3 +236,58 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 ### 5.4 读写混合 & 大 value 限制
 
 `keydb-benchmark` 不支持原生读写混合模式，大 value + 高 pipeline 触发 client buffer 溢出。建议换 `memtier_benchmark`。
+
+---
+
+## 6. 剩余优化空间
+
+### 6.1 RocksDB 层
+
+| 优化项 | 当前值 | 建议值 | 预期收益 |
+|--------|:---:|:---:|------|
+| compression | kNoCompression | **kLZ4Compression** 或 kZSTD | 1KB value 压缩率 ~30-50%, SST 大小减半 → compaction I/O 减半 |
+| max_background_compactions | 4 | **8** | 并行 compaction 翻倍, write stall 进一步减少 |
+| max_background_flushes | 2 | **4** | memtable 刷盘并行度提升 |
+| write_buffer_size | 64MB(默认) | **128MB** | 更大的 memtable → L0 合并频率降低 |
+| max_write_buffer_number | 2(默认) | **4** | 更多 memtable 缓冲写入峰值 |
+| compaction_style | Leveled | **Universal** (size_ratio=2) | 写放大从 ~10x 降到 ~2x, 适合写入密集的 FLASH 场景 |
+| block_cache_size | 8MB(默认) | **256MB** | 更多热数据缓存在 RocksDB 内存, 减少磁盘读取 |
+| WAL 写入 | 默认 | **Direct I/O** | 绕过 OS page cache, 减少内存拷贝 |
+
+### 6.2 KeyDB 层
+
+| 优化项 | 当前值 | 建议值 | 预期收益 |
+|--------|:---:|:---:|------|
+| server-threads | 2 | **4** (匹配 CPU P-core 数) | 更多线程分摊连接处理 |
+| maxmemory | 512MB | **2~4GB** | 更大 dict cache, 减少 RocksDB 读取 |
+| 编译优化 | -O0 debug | **-O2 -flto** | 恢复 LTO 全程序优化, CPU 路径提 20-40% |
+
+### 6.3 关于 DPDK / kernel bypass
+
+KeyDB 无法使用 DPDK 或类似 kernel bypass 方案，原因不是技术限制，而是**场景不匹配**：
+
+```
+DPDK / SPDK 适合的场景:                  KeyDB 的实际场景:
+
+  应用层                                  应用层
+    │                                      │
+  DPDK (用户态协议栈)                      RESP 协议解析 (用户态)
+    │                                      │
+  [绕过内核网络栈]                         write() / send() ← 必经之路
+    │                                      │
+  物理网卡                                 内核 TCP/IP 栈
+                                           │
+  数据路径: 应用→网卡 (0 次内核拷贝)        物理网卡
+                                           │
+                                          数据路径: 应用→内核→网卡 (1 次拷贝)
+```
+
+DPDK 的价值在**高 PPS (百万级包/秒)** 或**大块数据传输绕过内核**场景：
+- 分布式文件存储 (Ceph)：OSD 间复制数据块，GB 级传输，sendfile/splice 有意义
+- 高频交易 / 5G UPF：每包 64B，需要 10M+ PPS 线速处理
+
+KeyDB 的瓶颈不在网络栈拷贝（单次 `write()` ~1μs），而在：
+1. RocksDB compaction I/O（~50μs/次，占 SET 路径 80%+ 耗时）
+2. RESP 协议解析（~3μs，16B value 时占主导）
+
+用 DPDK 省掉的 1μs 网络拷贝，相比 50μs 的磁盘 I/O 微不足道。正确的优化方向是**减少磁盘 I/O**（压缩、Universal compaction、更大 block cache），而非折腾网络栈。
