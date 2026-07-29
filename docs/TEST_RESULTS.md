@@ -224,7 +224,7 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 
 > 原始代码中 `data_block_index_type=kDataBlockBinaryAndHash`、`block_size=16KB`、`checksum=kNoChecksum` 已在本次优化前设置，非本次新增。
 
-> 以上 5 项为全部有效优化，均在 `DefaultRocksDBOptions()` 中硬编码。
+> 以上 7 项为全部有效优化，均在 `DefaultRocksDBOptions()` 中硬编码（`BlockBasedTableOptions`），无法通过 `storage-provider-options` 配置。
 >
 > **探索过但被回退的调参**：`compression=kZSTD`（CPU 开销 > 磁盘节省）、`bottommost_compression=kZSTD`（同上）、`max_background_compactions=8`（8 线程争抢 NVMe 带宽）、`block_cache=128MB`（吃掉 KeyDB dict cache 内存）、`max_write_buffer_number=3`（OOM 风险）。最终结论：**只加 Bloom filter，其余保持 RocksDB 默认值。**
 
