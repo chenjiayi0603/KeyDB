@@ -22,8 +22,9 @@
 3. 🟡 **增加 compaction 并行度** — `max_background_compactions: 4 → 8`
    - 预期: write stall 进一步减少
 
-4. 🟡 **考虑 Universal Compaction** — 写放大从 ~10x 降到 ~2x
-   - 适合 FLASH 的写入密集场景, 需评估读放大增加的影响
+4. 🔵 **考虑 Universal Compaction** — 写放大从 ~10x 降到 ~2x, 但空间放大从 1.1x 升到 ~2x
+   - 双刃剑: 写快了但磁盘占用翻倍。FLASH 场景磁盘空间有限, 需权衡
+   - 可先用压缩 (LZ4) 抵消空间放大, 再评估是否切 Universal
 
 5. 🔵 **增大 block cache** — 当前默认 8MB → 256MB
    - 预期: 更多热数据缓存在 RocksDB 内存, 减少磁盘读取

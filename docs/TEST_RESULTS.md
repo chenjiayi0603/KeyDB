@@ -250,7 +250,7 @@ make ENABLE_FLASH=yes BUILD_TLS=yes MALLOC=jemalloc
 | max_background_flushes | 2 | **4** | memtable 刷盘并行度提升 |
 | write_buffer_size | 64MB(默认) | **128MB** | 更大的 memtable → L0 合并频率降低 |
 | max_write_buffer_number | 2(默认) | **4** | 更多 memtable 缓冲写入峰值 |
-| compaction_style | Leveled | **Universal** (size_ratio=2) | 写放大从 ~10x 降到 ~2x, 适合写入密集的 FLASH 场景 |
+| compaction_style | Leveled | Universal (需权衡) | 写放大 ~10x→~2x, 但空间放大 1.1x→~2x; FLASH 磁盘空间有限, 建议先上压缩再用 |
 | block_cache_size | 8MB(默认) | **256MB** | 更多热数据缓存在 RocksDB 内存, 减少磁盘读取 |
 | WAL 写入 | 默认 | **Direct I/O** | 绕过 OS page cache, 减少内存拷贝 |
 
